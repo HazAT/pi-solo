@@ -2,10 +2,9 @@
  * Solo — native integration between Pi and Solo (soloterm.com).
  *
  * Spawns Solo's bundled MCP helper as a long-lived subprocess and speaks
- * JSON-RPC over stdio. Every Solo MCP tool is registered as a first-class
- * Pi tool (solo_spawn_process, solo_todo_create, solo_scratchpad_write,
- * solo_timer_set, etc.) so the LLM can call them natively without going
- * through a generic mcp() wrapper.
+ * JSON-RPC over stdio. High-frequency Solo MCP tools are registered as
+ * first-class Pi tools, while lower-frequency catalog tools remain
+ * discoverable and callable through the `solo_tool` gateway.
  *
  * Auto-binds to SOLO_PROCESS_ID when Pi is launched inside a Solo agent.
  * Auto-reconnects on helper crash. No-ops cleanly when Solo isn't running
@@ -36,32 +35,50 @@ const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_NAME = "pi-solo-extension";
 const CLIENT_VERSION = "1.0.0";
 
-// Opt-in: suppress generic Solo process-management tools when the higher-
-// level subagent tools (`solo_subagent`, `solo_subagent_interrupt`, …) are
-// available. The LLM should reach for `solo_subagent` instead of stitching
-// together `solo_spawn_process` + `solo_send_input` for agent work.
-const HIDE_PROCESS_TOOLS = process.env.PI_SOLO_HIDE_PROCESS_TOOLS === "1";
-const PROCESS_TOOLS_HIDDEN_WHEN_SET = new Set([
-	"spawn_process",
-	"send_input",
-	"list_agent_tools",
-	"close_process",
-	"rename_process",
-	"stop_process",
-	"start_process",
-	"restart_process",
-	"start_all_commands",
-	"stop_all_commands",
-	"restart_all_commands",
-	"register_agent",
-	"clear_output",
-	"flush_terminal_perf",
-	"select_process",
-]);
+export type SoloToolSurfaceProfile = "core" | "full" | "minimal";
+export type SoloToolExposure = "direct" | "gateway";
 
-function shouldHideMcpTool(mcpName: string): boolean {
-	if (!HIDE_PROCESS_TOOLS) return false;
-	return PROCESS_TOOLS_HIDDEN_WHEN_SET.has(mcpName);
+export function parseToolSurfaceProfile(value: string | undefined): SoloToolSurfaceProfile {
+	const normalized = value?.trim().toLowerCase();
+	if (normalized === "full" || normalized === "minimal" || normalized === "core") {
+		return normalized;
+	}
+	return "core";
+}
+
+const TOOL_SURFACE_PROFILE = parseToolSurfaceProfile(process.env.PI_SOLO_TOOL_SURFACE);
+
+export function getMcpToolExposure(
+	name: string,
+	profile: SoloToolSurfaceProfile = TOOL_SURFACE_PROFILE,
+): SoloToolExposure {
+	if (profile === "full") return "direct";
+	if (profile === "minimal") return "gateway";
+	return name.startsWith("todo_") || name.startsWith("scratchpad_") || name.startsWith("lock_")
+		? "direct"
+		: "gateway";
+}
+
+export function getSoloToolCategory(name: string): string {
+	if (name.startsWith("todo_")) return "todos";
+	if (name.startsWith("scratchpad_")) return "scratchpads";
+	if (name.startsWith("lock_")) return "locks";
+	if (name.startsWith("timer_")) return "timers";
+	if (name.startsWith("kv_")) return "kv";
+	if (name === "whoami" || name === "bind_session_process" || name === "list_projects")
+		return "session";
+	if (name === "select_project" || name === "register_agent") return "session";
+	if (name === "get_project_status" || name === "get_project_stats") return "inspection";
+	if (name === "help" || name === "setup_agent_integration") return "docs";
+	if (/service|port|wait_for_bound_port/.test(name)) return "readiness";
+	if (
+		/process|^spawn_|^send_input$|agent_tool|output|terminal_perf|_all_commands$/.test(name) ||
+		name === "search_raw_output" ||
+		name === "search_output"
+	) {
+		return "processes";
+	}
+	return "misc";
 }
 
 // Idle window after which we close the helper subprocess so Solo's sidebar
@@ -540,6 +557,66 @@ export function normalizeInputSchema(schema?: McpToolDef["inputSchema"]): {
 	};
 }
 
+export type SoloToolListInclude = "gateway" | "direct" | "all";
+
+export interface SoloToolCatalogEntry {
+	name: string;
+	piName: string;
+	category: string;
+	exposure: SoloToolExposure;
+	description: string;
+}
+
+export function listSoloCatalogTools(
+	tools: Array<{ name: string; description?: string }>,
+	options: { query?: string; category?: string; include?: SoloToolListInclude } = {},
+	profile: SoloToolSurfaceProfile = TOOL_SURFACE_PROFILE,
+): SoloToolCatalogEntry[] {
+	const query = options.query?.trim().toLowerCase();
+	const category = options.category?.trim().toLowerCase();
+	const include = options.include ?? "gateway";
+
+	return tools
+		.map((tool) => {
+			const description = firstLine(tool.description ?? `Solo MCP tool: ${tool.name}`);
+			return {
+				name: tool.name,
+				piName: `${TOOL_PREFIX}${tool.name}`,
+				category: getSoloToolCategory(tool.name),
+				exposure: getMcpToolExposure(tool.name, profile),
+				description,
+			};
+		})
+		.filter((entry) => include === "all" || entry.exposure === include)
+		.filter((entry) => !category || entry.category === category)
+		.filter(
+			(entry) =>
+				!query ||
+				entry.name.toLowerCase().includes(query) ||
+				entry.piName.toLowerCase().includes(query) ||
+				entry.category.toLowerCase().includes(query) ||
+				entry.description.toLowerCase().includes(query),
+		);
+}
+
+function summarizeCatalogExposure(
+	tools: Array<{ name: string }>,
+	profile: SoloToolSurfaceProfile = TOOL_SURFACE_PROFILE,
+): { direct: number; gateway: number } {
+	let direct = 0;
+	let gateway = 0;
+	for (const tool of tools) {
+		if (getMcpToolExposure(tool.name, profile) === "direct") direct += 1;
+		else gateway += 1;
+	}
+	return { direct, gateway };
+}
+
+function formatCatalogCounts(tools: Array<{ name: string }>): string {
+	const counts = summarizeCatalogExposure(tools);
+	return `${tools.length} catalog (${counts.direct} direct, ${counts.gateway} via solo_tool, profile=${TOOL_SURFACE_PROFILE})`;
+}
+
 // -------------------------------------------------------------------------
 // Pretty status text for /solo and ctx.ui
 
@@ -555,7 +632,10 @@ function formatStatus(client: SoloMcpClient): string {
 		lines.push("MCP is disabled in Solo (Settings → Integrations → MCP).");
 	}
 	lines.push(`Helper: ${HELPER_PATH}`);
-	lines.push(`Tools registered: ${client.tools.length}`);
+	lines.push(`MCP tools: ${formatCatalogCounts(client.tools)}`);
+	lines.push(
+		"Direct extras: solo_tool, solo_subagent, solo_subagent_interrupt, solo_subagents_list",
+	);
 	const groups = summarizeToolGroups(client.tools);
 	if (groups) lines.push(`Groups: ${groups}`);
 	if (client.boundProcessId) {
@@ -567,6 +647,268 @@ function formatStatus(client: SoloMcpClient): string {
 		lines.push(`Project: ${client.boundProject.name ?? "?"} (${client.boundProject.path ?? "?"})`);
 	}
 	return lines.join("\n");
+}
+
+const SoloToolGatewayParams = {
+	type: "object",
+	properties: {
+		action: {
+			type: "string",
+			enum: ["list", "schema", "call"],
+			description:
+				"Gateway action: list hidden/direct catalog tools, inspect a schema, or call a Solo MCP tool.",
+		},
+		query: {
+			type: "string",
+			description: "Optional name/category/description filter for action=list.",
+		},
+		category: { type: "string", description: "Optional category filter for action=list." },
+		include: {
+			type: "string",
+			enum: ["gateway", "direct", "all"],
+			description: "Which exposure bucket to list. Defaults to gateway.",
+		},
+		name: {
+			type: "string",
+			description:
+				"Solo MCP tool name for schema/call. Accepts raw names or Pi-style solo_* names.",
+		},
+		arguments: {
+			type: "object",
+			description: "Arguments to pass to the Solo MCP tool for action=call.",
+			additionalProperties: true,
+		},
+		reason: {
+			type: "string",
+			description: "Required for state-changing or destructive gateway calls.",
+		},
+	},
+	required: ["action"],
+	additionalProperties: false,
+};
+
+type SoloToolGatewayArgs = {
+	action?: "list" | "schema" | "call";
+	query?: string;
+	category?: string;
+	include?: SoloToolListInclude;
+	name?: string;
+	arguments?: unknown;
+	reason?: string;
+};
+
+function resolveCatalogTool(tools: McpToolDef[], requested: unknown): McpToolDef | undefined {
+	if (typeof requested !== "string") return undefined;
+	const trimmed = requested.trim();
+	if (!trimmed) return undefined;
+	return (
+		tools.find((tool) => tool.name === trimmed) ??
+		(trimmed.startsWith(TOOL_PREFIX)
+			? tools.find((tool) => tool.name === trimmed.slice(TOOL_PREFIX.length))
+			: undefined)
+	);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function gatewayCallRequiresReason(name: string): boolean {
+	return !(
+		name.startsWith("list_") ||
+		name.endsWith("_list") ||
+		name.startsWith("get_") ||
+		name.startsWith("search_") ||
+		name.startsWith("wait_for_") ||
+		name === "help" ||
+		name === "whoami" ||
+		name === "scratchpad_read" ||
+		name === "todo_get" ||
+		name === "lock_status" ||
+		name === "services_list"
+	);
+}
+
+function gatewayError(text: string, details: Record<string, unknown> = {}) {
+	return {
+		content: [{ type: "text" as const, text }],
+		isError: true,
+		details,
+	};
+}
+
+function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
+	pi.registerTool({
+		name: "solo_tool",
+		label: "Solo Tool Gateway",
+		description:
+			"Gateway for Solo MCP catalog tools that are not exposed directly. " +
+			"Use action=list to discover tools, action=schema to inspect inputs, and action=call to invoke by raw or solo_* name.",
+		promptSnippet:
+			"List, inspect, or call Solo MCP catalog tools hidden from the direct tool surface.",
+		parameters: SoloToolGatewayParams as any,
+		async execute(_toolCallId: string, params: SoloToolGatewayArgs = {}) {
+			if (!client.isReady()) {
+				return gatewayError(
+					client.isMcpDisabled()
+						? "Solo MCP is disabled in Solo settings (Integrations → MCP). Re-enable it and run /solo-reconnect."
+						: `Solo MCP not ready (state=${client.state}${client.lastError ? `: ${client.lastError}` : ""}).`,
+					{ state: client.state, error: client.lastError },
+				);
+			}
+
+			if (params.action !== "list" && params.action !== "schema" && params.action !== "call") {
+				return gatewayError(`Invalid solo_tool action: ${String(params.action)}`, {
+					action: params.action,
+				});
+			}
+
+			if (params.action === "list") {
+				const include = params.include ?? "gateway";
+				if (include !== "gateway" && include !== "direct" && include !== "all") {
+					return gatewayError(`Invalid include value: ${String(params.include)}`, {
+						action: "list",
+					});
+				}
+				const tools = listSoloCatalogTools(
+					client.tools,
+					{ query: params.query, category: params.category, include },
+					TOOL_SURFACE_PROFILE,
+				);
+				const lines = tools.map(
+					(tool) => `• ${tool.piName} (${tool.category}, ${tool.exposure}) — ${tool.description}`,
+				);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: lines.length
+								? lines.join("\n")
+								: `No Solo MCP tools matched include=${include}.`,
+						},
+					],
+					details: {
+						action: "list",
+						profile: TOOL_SURFACE_PROFILE,
+						include,
+						query: params.query,
+						category: params.category,
+						tools,
+					},
+				};
+			}
+
+			const tool = resolveCatalogTool(client.tools, params.name);
+			if (!tool) {
+				return gatewayError(`Unknown Solo MCP tool: ${String(params.name ?? "")}`, {
+					action: params.action,
+					name: params.name,
+				});
+			}
+
+			const exposure = getMcpToolExposure(tool.name);
+			const category = getSoloToolCategory(tool.name);
+			const schema = normalizeInputSchema(tool.inputSchema);
+			const baseDetails = {
+				mcpTool: tool.name,
+				piTool: `${TOOL_PREFIX}${tool.name}`,
+				exposure,
+				category,
+				profile: TOOL_SURFACE_PROFILE,
+			};
+
+			if (params.action === "schema") {
+				const payload = {
+					...baseDetails,
+					description: tool.description ?? `Solo MCP tool: ${tool.name}`,
+					inputSchema: schema,
+				};
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+					details: payload,
+				};
+			}
+
+			if (gatewayCallRequiresReason(tool.name) && !params.reason?.trim()) {
+				return gatewayError(
+					`solo_tool call to ${tool.name} requires a non-empty reason because it can change Solo state.`,
+					baseDetails,
+				);
+			}
+
+			if (params.arguments != null && !isPlainRecord(params.arguments)) {
+				return gatewayError(
+					"solo_tool call arguments must be an object when provided.",
+					baseDetails,
+				);
+			}
+
+			try {
+				const callArgs = params.arguments ?? {};
+				const result = await client.callTool(tool.name, callArgs);
+				const details: any = {
+					...baseDetails,
+					action: "call",
+					structuredContent: result.structuredContent,
+				};
+
+				if (!result.isError && SHORTCUT_TOOLS.has(tool.name)) {
+					const data: any = extractStructuredOrText(result);
+					const processId =
+						typeof data?.process_id === "number"
+							? data.process_id
+							: typeof data?.id === "number"
+								? data.id
+								: undefined;
+					const projectId = data?.project_id ?? (callArgs as any).project_id ?? undefined;
+					if (processId != null) {
+						details.jumpHint = await computeJumpHint(
+							client,
+							processId,
+							typeof projectId === "number" ? projectId : undefined,
+						);
+					}
+				}
+
+				return {
+					content: mcpContentToPi(result.content),
+					isError: result.isError === true,
+					details,
+				};
+			} catch (err) {
+				return gatewayError(
+					`Solo tool call failed: ${err instanceof Error ? err.message : String(err)}`,
+					baseDetails,
+				);
+			}
+		},
+		renderCall(args: ToolArgs, theme: any) {
+			const action = typeof args.action === "string" ? args.action : "?";
+			const name = typeof args.name === "string" && args.name ? ` ${args.name}` : "";
+			let text =
+				theme.fg("accent", "○") +
+				" " +
+				theme.fg("toolTitle", theme.bold("solo_tool")) +
+				theme.fg("accent", ` ${action}${name}`);
+			if (typeof args.reason === "string" && args.reason.trim()) {
+				text += theme.fg("dim", ` — ${firstLine(args.reason, 80)}`);
+			}
+			return new Text(text, 0, 0);
+		},
+		renderResult(result: ToolResult, _opts: { isPartial?: boolean }, theme: any) {
+			if (result.isError) {
+				return new Text(
+					theme.fg("error", `✘ solo_tool: ${firstLine(result.content[0]?.text, 120)}`),
+					0,
+					0,
+				);
+			}
+			const details = result.details as any;
+			const count = Array.isArray(details?.tools) ? ` · ${details.tools.length} tools` : "";
+			const subject = details?.mcpTool ?? details?.action ?? "ok";
+			return new Text(theme.fg("success", "✓") + " " + theme.fg("dim", `${subject}${count}`), 0, 0);
+		},
+	});
 }
 
 // -------------------------------------------------------------------------
@@ -581,15 +923,9 @@ export default function soloExtension(pi: ExtensionAPI) {
 
 	const registerToolsFromCatalog = (client: SoloMcpClient) => {
 		for (const tool of client.tools) {
+			if (getMcpToolExposure(tool.name) !== "direct") continue;
 			const piName = `${TOOL_PREFIX}${tool.name}`;
 			if (registered.has(piName)) continue;
-			if (shouldHideMcpTool(tool.name)) {
-				// PI_SOLO_HIDE_PROCESS_TOOLS=1 hides the generic process-management
-				// tools so the LLM reaches for solo_subagent instead. Mark as
-				// registered so we don't keep skipping them on every refresh.
-				registered.add(piName);
-				continue;
-			}
 			registered.add(piName);
 
 			const parameters = normalizeInputSchema(tool.inputSchema);
@@ -672,10 +1008,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 	const onChange = async () => {
 		registerToolsFromCatalog(client);
 		if (uiCtx?.hasUI) {
-			uiCtx.ui.notify(
-				`Solo: ${client.tools.length} tool${client.tools.length === 1 ? "" : "s"} now available`,
-				"info",
-			);
+			uiCtx.ui.notify(`Solo: ${formatCatalogCounts(client.tools)} now available`, "info");
 			pushStatus();
 		}
 	};
@@ -700,7 +1033,8 @@ export default function soloExtension(pi: ExtensionAPI) {
 		} else if (client.tools.length === 0) {
 			tag = theme.fg("dim", "solo: off");
 		} else {
-			tag = theme.fg("dim", `solo (${summarizeToolGroups(client.tools)})`);
+			const counts = summarizeCatalogExposure(client.tools);
+			tag = theme.fg("dim", `solo (${counts.direct} direct/${counts.gateway} gw)`);
 		}
 		uiCtx.ui.setStatus("solo", tag);
 	};
@@ -727,7 +1061,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 			if (uiCtx?.hasUI) {
 				const msg = c.isMcpDisabled()
 					? "Solo connected — but MCP is disabled in Solo settings"
-					: `Solo connected — ${c.tools.length} tool${c.tools.length === 1 ? "" : "s"} registered`;
+					: `Solo connected — ${formatCatalogCounts(c.tools)}`;
 				uiCtx.ui.notify(msg, c.isMcpDisabled() ? "warning" : "info");
 			}
 			syncSpinner();
@@ -738,6 +1072,8 @@ export default function soloExtension(pi: ExtensionAPI) {
 			pushStatus();
 		},
 	);
+
+	registerSoloToolGateway(pi, client);
 
 	// Hook up the Solo-native subagent module. We pass the live SoloMcpClient
 	// in so subagents can call spawn_process / send_input / scratchpad_write
@@ -773,16 +1109,17 @@ export default function soloExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("solo-tools", {
-		description: "List Solo MCP tools registered in Pi",
+		description: "List Solo MCP catalog tools and their Pi exposure",
 		handler: async (_args, ctx) => {
 			if (!client.tools.length) {
-				ctx.ui.notify("No Solo tools registered.", "warning");
+				ctx.ui.notify("No Solo MCP tools discovered.", "warning");
 				return;
 			}
-			const lines = client.tools
-				.map((t) => `• ${TOOL_PREFIX}${t.name} — ${(t.description ?? "").split("\n")[0]}`)
+			const tools = listSoloCatalogTools(client.tools, { include: "all" });
+			const lines = tools
+				.map((t) => `• ${t.piName} [${t.exposure}/${t.category}] — ${t.description}`)
 				.join("\n");
-			ctx.ui.notify(`Solo tools (${client.tools.length}):\n${lines}`, "info");
+			ctx.ui.notify(`Solo MCP tools (${formatCatalogCounts(client.tools)}):\n${lines}`, "info");
 		},
 	});
 
@@ -807,8 +1144,8 @@ export default function soloExtension(pi: ExtensionAPI) {
 				if (changed) await onChange();
 				ctx.ui.notify(
 					changed
-						? `Solo tools refreshed — ${client.tools.length} total`
-						: `Solo tools unchanged (${client.tools.length})`,
+						? `Solo tools refreshed — ${formatCatalogCounts(client.tools)}`
+						: `Solo tools unchanged (${formatCatalogCounts(client.tools)})`,
 					"info",
 				);
 			} catch (err) {

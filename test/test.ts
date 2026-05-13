@@ -15,14 +15,88 @@ import {
 	extractStructured,
 	extractTextJson,
 	firstLine,
+	getMcpToolExposure,
+	getSoloToolCategory,
 	humanizeToolLabel,
 	lineCount,
+	listSoloCatalogTools,
 	markerFor,
 	mcpContentToPi,
 	normalizeInputSchema,
+	parseToolSurfaceProfile,
 	pickSubject,
 	str,
 } from "../pi-extension/solo/index.ts";
+
+// ---------------------------------------------------------------------------
+// Solo tool surface policy
+
+test("parseToolSurfaceProfile — defaults to core", () => {
+	assert.equal(parseToolSurfaceProfile(undefined), "core");
+	assert.equal(parseToolSurfaceProfile(""), "core");
+	assert.equal(parseToolSurfaceProfile("unexpected"), "core");
+});
+
+test("parseToolSurfaceProfile — accepts known values case-insensitively", () => {
+	assert.equal(parseToolSurfaceProfile("core"), "core");
+	assert.equal(parseToolSurfaceProfile(" FULL "), "full");
+	assert.equal(parseToolSurfaceProfile("minimal"), "minimal");
+});
+
+test("getMcpToolExposure — core exposes only todos scratchpads and locks", () => {
+	assert.equal(getMcpToolExposure("todo_create", "core"), "direct");
+	assert.equal(getMcpToolExposure("scratchpad_write", "core"), "direct");
+	assert.equal(getMcpToolExposure("lock_acquire", "core"), "direct");
+	assert.equal(getMcpToolExposure("get_project_stats", "core"), "gateway");
+	assert.equal(getMcpToolExposure("list_processes", "core"), "gateway");
+	assert.equal(getMcpToolExposure("help", "core"), "gateway");
+});
+
+test("getMcpToolExposure — full exposes all and minimal exposes none", () => {
+	assert.equal(getMcpToolExposure("get_project_stats", "full"), "direct");
+	assert.equal(getMcpToolExposure("todo_create", "minimal"), "gateway");
+});
+
+test("getSoloToolCategory — groups common Solo MCP tools", () => {
+	assert.equal(getSoloToolCategory("todo_create"), "todos");
+	assert.equal(getSoloToolCategory("scratchpad_write"), "scratchpads");
+	assert.equal(getSoloToolCategory("lock_acquire"), "locks");
+	assert.equal(getSoloToolCategory("timer_set"), "timers");
+	assert.equal(getSoloToolCategory("kv_get"), "kv");
+	assert.equal(getSoloToolCategory("list_processes"), "processes");
+	assert.equal(getSoloToolCategory("wait_for_bound_port"), "readiness");
+	assert.equal(getSoloToolCategory("get_project_stats"), "inspection");
+	assert.equal(getSoloToolCategory("help"), "docs");
+	assert.equal(getSoloToolCategory("whoami"), "session");
+});
+
+test("listSoloCatalogTools — defaults to gateway entries", () => {
+	const tools = listSoloCatalogTools([
+		{ name: "todo_create", description: "Create a todo" },
+		{ name: "get_project_stats", description: "Return CPU and memory usage" },
+	]);
+	assert.deepEqual(
+		tools.map((tool) => tool.name),
+		["get_project_stats"],
+	);
+	assert.equal(tools[0].piName, "solo_get_project_stats");
+	assert.equal(tools[0].category, "inspection");
+});
+
+test("listSoloCatalogTools — can include direct tools and filter by query", () => {
+	const tools = listSoloCatalogTools(
+		[
+			{ name: "todo_create", description: "Create a todo" },
+			{ name: "scratchpad_write", description: "Write a scratchpad" },
+			{ name: "get_project_stats", description: "Return CPU and memory usage" },
+		],
+		{ include: "direct", query: "scratch" },
+	);
+	assert.deepEqual(
+		tools.map((tool) => tool.name),
+		["scratchpad_write"],
+	);
+});
 
 // ---------------------------------------------------------------------------
 // humanizeToolLabel
@@ -417,7 +491,11 @@ test("buildWakeBody — autonomous marker includes ids and close instruction", (
 		/^\[pi-solo:subagent-done id=32 scratchpad=4 name="E2E Worker" agent="worker"\]/,
 	);
 	assert.match(body, /solo_scratchpad_read\(scratchpad_id=4\)/);
-	assert.match(body, /solo_close_process\(process_id=32\)/);
+	assert.match(body, /solo_tool\(\{ action: "call", name: "get_process_output"/);
+	assert.match(body, /solo_tool\(\{ action: "call", name: "send_input"/);
+	assert.match(body, /reason: "resume subagent after premature idle wake"/);
+	assert.match(body, /solo_tool\(\{ action: "call", name: "close_process"/);
+	assert.match(body, /reason: "close completed subagent pane"/);
 });
 
 test("buildWakeBody — interactive marker tells parent not to close", () => {
@@ -430,6 +508,7 @@ test("buildWakeBody — interactive marker tells parent not to close", () => {
 	assert.match(body, /^\[pi-solo:subagent-interactive-ready id=12 name="Planner"\]/);
 	assert.match(body, /Do not close this pane automatically/);
 	assert.doesNotMatch(body, /solo_close_process/);
+	assert.doesNotMatch(body, /name: "close_process"/);
 });
 
 test("buildWakeBody — escapes marker quotes", () => {

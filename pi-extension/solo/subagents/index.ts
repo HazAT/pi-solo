@@ -335,12 +335,14 @@ export function buildWakeBody(params: BuildWakeBodyParams): string {
 		marker,
 		`Sub-agent "${params.subagentName}" (Solo agent #${params.processId}) triggered its Solo idle watcher or reached the ${maxWait} minute watcher cap.`,
 		scratchpadRef,
-		"If this looks premature, call solo_get_process_output(process_id=" +
+		'If this looks premature, inspect output with solo_tool({ action: "call", name: "get_process_output", arguments: { process_id: ' +
 			params.processId +
-			", lines=80) and resume the conversation with solo_send_input if needed.",
-		"When you have used the result, close the subagent pane with solo_close_process(process_id=" +
+			', lines: 80 } }) and resume the conversation with solo_tool({ action: "call", name: "send_input", arguments: { process_id: ' +
 			params.processId +
-			").",
+			', input: "..." }, reason: "resume subagent after premature idle wake" }) if needed.',
+		'When you have used the result, close the subagent pane with solo_tool({ action: "call", name: "close_process", arguments: { process_id: ' +
+			params.processId +
+			' }, reason: "close completed subagent pane" }).',
 	].join("\n\n");
 }
 

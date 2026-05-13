@@ -6,12 +6,12 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 
 - Auto-detects Solo's bundled MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`.
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
-- Queries Solo for its full tool catalog and registers every tool (`spawn_process`, `todo_create`, `scratchpad_write`, `timer_set`, `lock_acquire`, …) as a **first-class Pi tool**. No `mcp()` wrapper indirection.
+- Queries Solo for its full tool catalog and exposes a curated tool surface. By default, high-frequency `todo_*`, `scratchpad_*`, and `lock_*` MCP tools are **first-class Pi tools**; lower-frequency process/project/admin tools stay discoverable and callable through `solo_tool`.
 - **Solo-native subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
 - **Auto-binds to `SOLO_PROCESS_ID`** when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
 - **Idle-closes the helper** after 5 s of inactivity so it doesn't show up as a persistent subprocess under your Pi row in Solo's sidebar. Bursts of MCP calls reuse one warm helper; quiet periods cost zero subprocesses.
 - **Renders keyboard shortcuts** on spawn/start/restart/status results so you can press `⌥3 · ⌘5` (or whatever the position resolves to) to jump straight to the relevant agent in Solo's sidebar.
-- Polished `renderCall`/`renderResult` for every Solo tool — no raw JSON dumps in your tool log.
+- Polished `renderCall`/`renderResult` for direct Solo tools — no raw JSON dumps in your tool log.
 - Gracefully no-ops when Solo isn't installed or MCP is disabled in Solo settings.
 
 ## Install
@@ -43,14 +43,14 @@ The extension is auto-discovered. Run `/reload` if Pi is already running.
 
 ## Commands
 
-| Command                        | Purpose                                                     |
-| ------------------------------ | ----------------------------------------------------------- |
-| `/solo`                        | Show connection status, tool count, bound project & process |
-| `/solo-tools`                  | List every Solo tool currently registered                   |
-| `/solo-refresh`                | Re-query Solo for its current tool catalog (cheap)          |
-| `/solo-reconnect`              | Force-restart the helper                                    |
-| `/solo-bind <process-id>`      | Manually bind this Pi to a Solo process                     |
-| `/solo-subagent <name> [task]` | Spawn a Solo subagent by agent name (scout, worker, …)      |
+| Command                        | Purpose                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| `/solo`                        | Show connection status, catalog/direct/gateway counts, bound project & process |
+| `/solo-tools`                  | List Solo MCP catalog tools and whether they are direct or gateway-only        |
+| `/solo-refresh`                | Re-query Solo for its current tool catalog (cheap)                             |
+| `/solo-reconnect`              | Force-restart the helper                                                       |
+| `/solo-bind <process-id>`      | Manually bind this Pi to a Solo process                                        |
+| `/solo-subagent <name> [task]` | Spawn a Solo subagent by agent name (scout, worker, …)                         |
 
 ## Solo subagents
 
@@ -58,11 +58,12 @@ Solo subagents lean into Solo's own primitives: no cmux/tmux/zellij/wezterm abst
 
 ### Tools
 
-| Tool                      | Purpose                                                                        |
-| ------------------------- | ------------------------------------------------------------------------------ |
-| `solo_subagent`           | Spawn a sub-agent in a Solo agent pane. Fire-and-forget; parent wakes on idle. |
-| `solo_subagent_interrupt` | Send Escape to interrupt the active turn (pane stays alive).                   |
-| `solo_subagents_list`     | List available agent definitions from `~/.pi/agent/agents/` and `.pi/agents/`. |
+| Tool                      | Purpose                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------- |
+| `solo_tool`               | List, inspect, or call Solo MCP catalog tools that are hidden from the direct surface. |
+| `solo_subagent`           | Spawn a sub-agent in a Solo agent pane. Fire-and-forget; parent wakes on idle.         |
+| `solo_subagent_interrupt` | Send Escape to interrupt the active turn (pane stays alive).                           |
+| `solo_subagents_list`     | List available agent definitions from `~/.pi/agent/agents/` and `.pi/agents/`.         |
 
 ### Agent definitions
 
@@ -89,23 +90,50 @@ Whenever a subagent produces an artifact (plan, spec, scout report, review notes
 
 This happens by default for every subagent. Set `output: false` in the agent definition or pass `scratchpad: false` to opt out.
 
-### Optional: hide generic process tools
+### Solo MCP tool surface
 
-Set `PI_SOLO_HIDE_PROCESS_TOOLS=1` to suppress `solo_spawn_process`, `solo_send_input`, `solo_list_agent_tools`, `solo_close_process`, and friends from the LLM-facing tool list. `solo_subagent` still calls the underlying raw MCP tools internally. Status, output, search, and todo/scratchpad/timer/lock tools remain available.
+`PI_SOLO_TOOL_SURFACE` controls how much of Solo's MCP catalog is registered directly in Pi:
+
+| Profile   | Behavior                                                                                                                |
+| --------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `core`    | Default. Direct-register `todo_*`, `scratchpad_*`, and `lock_*`; route all other MCP catalog tools through `solo_tool`. |
+| `full`    | Direct-register every Solo MCP catalog tool, matching the original all-tools behavior.                                  |
+| `minimal` | Direct-register no Solo MCP catalog tools; use `solo_tool` for all catalog access.                                      |
+
+Hand-written tools remain direct in every profile: `solo_tool`, `solo_subagent`, `solo_subagent_interrupt`, and `solo_subagents_list`.
+
+Use the gateway to discover and call hidden tools:
+
+```typescript
+solo_tool({ action: "list", query: "process" });
+solo_tool({ action: "schema", name: "get_project_stats" });
+solo_tool({ action: "call", name: "get_project_stats", arguments: {} });
+```
+
+State-changing gateway calls require a short reason:
+
+```typescript
+solo_tool({
+	action: "call",
+	name: "close_process",
+	arguments: { process_id: 42 },
+	reason: "close completed worker pane",
+});
+```
 
 ## Configuration
 
-| Env var                      | Default                                     | Purpose                                                          |
-| ---------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| `SOLO_MCP_HELPER`            | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper                                       |
-| `SOLOTERM_APP_DATA_DIR`      | `~/.config/soloterm`                        | Solo's app data dir (passed through)                             |
-| `SOLO_PROCESS_ID`            | —                                           | If set, Pi auto-binds to that Solo process                       |
-| `PI_SOLO_DISABLED`           | —                                           | Set to `1` to disable the extension entirely                     |
-| `PI_SOLO_HIDE_PROCESS_TOOLS` | —                                           | Set to `1` to hide generic process tools when subagents are used |
+| Env var                 | Default                                     | Purpose                                            |
+| ----------------------- | ------------------------------------------- | -------------------------------------------------- |
+| `SOLO_MCP_HELPER`       | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper                         |
+| `SOLOTERM_APP_DATA_DIR` | `~/.config/soloterm`                        | Solo's app data dir (passed through)               |
+| `SOLO_PROCESS_ID`       | —                                           | If set, Pi auto-binds to that Solo process         |
+| `PI_SOLO_DISABLED`      | —                                           | Set to `1` to disable the extension entirely       |
+| `PI_SOLO_TOOL_SURFACE`  | `core`                                      | Tool surface profile: `core`, `full`, or `minimal` |
 
 ## How it works under the hood
 
-Solo ships a bundled stdio MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`. The helper reads the shared MCP secret from `~/.config/soloterm/solo.db`, connects to Solo's local Unix socket at `~/.config/soloterm/solo-mcp.sock`, and bridges JSON-RPC over stdio. This extension just spawns that helper, speaks the standard MCP protocol over its pipes, and adapts each tool into a Pi tool.
+Solo ships a bundled stdio MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`. The helper reads the shared MCP secret from `~/.config/soloterm/solo.db`, connects to Solo's local Unix socket at `~/.config/soloterm/solo-mcp.sock`, and bridges JSON-RPC over stdio. This extension spawns that helper, speaks the standard MCP protocol over its pipes, direct-registers the selected profile's tools, and keeps the rest reachable through `solo_tool`.
 
 There is **no separate MCP server** in this extension. We talk to Solo directly using the helper Solo already provides.
 

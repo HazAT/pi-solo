@@ -1,7 +1,7 @@
 {
   "name": "pi-solo",
   "version": "0.1.0",
-  "description": "Pi extension for Solo (soloterm.com) — registers every Solo MCP tool as a first-class Pi tool, auto-binds to SOLO_PROCESS_ID, idle-closes the helper so it stays out of Solo's process tree, and renders Solo keyboard shortcuts on spawn/start/restart/status results.",
+  "description": "Pi extension for Solo (soloterm.com) — exposes curated direct Solo MCP tools plus a solo_tool gateway, auto-binds to SOLO_PROCESS_ID, idle-closes the helper, and renders Solo keyboard shortcuts.",
   "keywords": [
     "agents",
     "mcp",
