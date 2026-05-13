@@ -278,11 +278,11 @@ export function buildWrappedTask(params: BuildTaskParams): string {
 				? ` Use scratchpad_id: ${params.artifactScratchpadId} and expected_revision: ${params.artifactScratchpadRevision} when you overwrite the placeholder.`
 				: params.artifactScratchpadId != null
 					? ` Read scratchpad_id: ${params.artifactScratchpadId} first if you need its latest revision, then overwrite the placeholder.`
-					: " If it does not exist yet, create it with solo_scratchpad_write using that name.";
+					: " If it does not exist yet, create it with scratchpad_write using that name.";
 		sections.push(
 			[
 				"### Artifact (Solo scratchpad)",
-				`Save any artifact you produce (plan, spec, context document, report, result note, etc.) to the Solo scratchpad named "${params.artifactScratchpadName}"${idText} via solo_scratchpad_write.${revisionText}`,
+				`Save any artifact you produce (plan, spec, context document, report, result note, etc.) to the Solo scratchpad named "${params.artifactScratchpadName}"${idText} via scratchpad_write.${revisionText}`,
 				"Reference the scratchpad name and id in your final summary so the parent can pick up the result.",
 			].join("\n\n"),
 		);
@@ -314,7 +314,7 @@ export function buildWakeBody(params: BuildWakeBodyParams): string {
 	const scratchpadRef = params.scratchpadName
 		? `Its artifact scratchpad is "${params.scratchpadName}"${
 				params.scratchpadId != null ? ` (id ${params.scratchpadId})` : ""
-			}. Read it with solo_scratchpad_read${
+			}. Read it with scratchpad_read${
 				params.scratchpadId != null
 					? `(scratchpad_id=${params.scratchpadId})`
 					: ` after locating it by name`
@@ -543,9 +543,9 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		return { action: "continue" };
 	});
 
-	// ── solo_subagent ──
+	// ── subagent ──
 	pi.registerTool({
-		name: "solo_subagent",
+		name: "subagent",
 		label: "Solo Subagent",
 		description:
 			"Spawn a sub-agent as a real Solo agent process (kind=agent). " +
@@ -636,9 +636,9 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		},
 	});
 
-	// ── solo_subagent_interrupt ──
+	// ── subagent_interrupt ──
 	pi.registerTool({
-		name: "solo_subagent_interrupt",
+		name: "subagent_interrupt",
 		label: "Interrupt Solo Subagent",
 		description:
 			"Send Escape to a running Solo subagent. The Solo pane and idle timer stay alive; this only interrupts the active turn.",
@@ -681,14 +681,13 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		},
 	});
 
-	// ── solo_subagents_list ──
+	// ── subagents_list ──
 	pi.registerTool({
-		name: "solo_subagents_list",
+		name: "subagents_list",
 		label: "List Solo Subagent Definitions",
 		description:
 			"List all available subagent definitions. Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. Project-local agents override global ones with the same name.",
-		promptSnippet:
-			"List the agent definitions available to solo_subagent (scout, worker, planner, …).",
+		promptSnippet: "List the agent definitions available to subagent (scout, worker, planner, …).",
 		parameters: Type.Object({}),
 		async execute() {
 			const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
@@ -735,12 +734,12 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 			const taskText = task || `You are the ${agentName} agent. Wait for instructions.`;
 			const displayName = agentName[0]!.toUpperCase() + agentName.slice(1);
 			pi.sendUserMessage(
-				`Use solo_subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`,
+				`Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`,
 			);
 		},
 	});
 
-	pi.registerMessageRenderer("solo_subagent_result", (message, _options, theme) => {
+	pi.registerMessageRenderer("subagent_result", (message, _options, theme) => {
 		const details = message.details as any;
 		if (!details) return undefined;
 		return {

@@ -79,7 +79,7 @@ test("listSoloCatalogTools — defaults to gateway entries", () => {
 		tools.map((tool) => tool.name),
 		["get_project_stats"],
 	);
-	assert.equal(tools[0].piName, "solo_get_project_stats");
+	assert.equal(tools[0].piName, "get_project_stats");
 	assert.equal(tools[0].category, "inspection");
 });
 
@@ -490,7 +490,7 @@ test("buildWakeBody — autonomous marker includes ids and close instruction", (
 		body,
 		/^\[pi-solo:subagent-done id=32 scratchpad=4 name="E2E Worker" agent="worker"\]/,
 	);
-	assert.match(body, /solo_scratchpad_read\(scratchpad_id=4\)/);
+	assert.match(body, /scratchpad_read\(scratchpad_id=4\)/);
 	assert.match(body, /solo_tool\(\{ action: "call", name: "get_process_output"/);
 	assert.match(body, /solo_tool\(\{ action: "call", name: "send_input"/);
 	assert.match(body, /reason: "resume subagent after premature idle wake"/);
@@ -507,7 +507,7 @@ test("buildWakeBody — interactive marker tells parent not to close", () => {
 	});
 	assert.match(body, /^\[pi-solo:subagent-interactive-ready id=12 name="Planner"\]/);
 	assert.match(body, /Do not close this pane automatically/);
-	assert.doesNotMatch(body, /solo_close_process/);
+	assert.doesNotMatch(body, /close_process/);
 	assert.doesNotMatch(body, /name: "close_process"/);
 });
 

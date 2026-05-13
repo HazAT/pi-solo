@@ -30,7 +30,6 @@ const APP_DATA_DIR = process.env.SOLOTERM_APP_DATA_DIR ?? join(homedir(), ".conf
 const SOLO_PROCESS_ID = process.env.SOLO_PROCESS_ID;
 const DISABLED = process.env.PI_SOLO_DISABLED === "1";
 
-const TOOL_PREFIX = "solo_";
 const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_NAME = "pi-solo-extension";
 const CLIENT_VERSION = "1.0.0";
@@ -581,7 +580,7 @@ export function listSoloCatalogTools(
 			const description = firstLine(tool.description ?? `Solo MCP tool: ${tool.name}`);
 			return {
 				name: tool.name,
-				piName: `${TOOL_PREFIX}${tool.name}`,
+				piName: tool.name,
 				category: getSoloToolCategory(tool.name),
 				exposure: getMcpToolExposure(tool.name, profile),
 				description,
@@ -633,9 +632,7 @@ function formatStatus(client: SoloMcpClient): string {
 	}
 	lines.push(`Helper: ${HELPER_PATH}`);
 	lines.push(`MCP tools: ${formatCatalogCounts(client.tools)}`);
-	lines.push(
-		"Direct extras: solo_tool, solo_subagent, solo_subagent_interrupt, solo_subagents_list",
-	);
+	lines.push("Direct extras: solo_tool, subagent, subagent_interrupt, subagents_list");
 	const groups = summarizeToolGroups(client.tools);
 	if (groups) lines.push(`Groups: ${groups}`);
 	if (client.boundProcessId) {
@@ -670,8 +667,7 @@ const SoloToolGatewayParams = {
 		},
 		name: {
 			type: "string",
-			description:
-				"Solo MCP tool name for schema/call. Accepts raw names or Pi-style solo_* names.",
+			description: "Solo MCP tool name for schema/call.",
 		},
 		arguments: {
 			type: "object",
@@ -701,12 +697,7 @@ function resolveCatalogTool(tools: McpToolDef[], requested: unknown): McpToolDef
 	if (typeof requested !== "string") return undefined;
 	const trimmed = requested.trim();
 	if (!trimmed) return undefined;
-	return (
-		tools.find((tool) => tool.name === trimmed) ??
-		(trimmed.startsWith(TOOL_PREFIX)
-			? tools.find((tool) => tool.name === trimmed.slice(TOOL_PREFIX.length))
-			: undefined)
-	);
+	return tools.find((tool) => tool.name === trimmed);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -743,7 +734,7 @@ function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
 		label: "Solo Tool Gateway",
 		description:
 			"Gateway for Solo MCP catalog tools that are not exposed directly. " +
-			"Use action=list to discover tools, action=schema to inspect inputs, and action=call to invoke by raw or solo_* name.",
+			"Use action=list to discover tools, action=schema to inspect inputs, and action=call to invoke a Solo MCP tool.",
 		promptSnippet:
 			"List, inspect, or call Solo MCP catalog tools hidden from the direct tool surface.",
 		parameters: SoloToolGatewayParams as any,
@@ -811,7 +802,7 @@ function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
 			const schema = normalizeInputSchema(tool.inputSchema);
 			const baseDetails = {
 				mcpTool: tool.name,
-				piTool: `${TOOL_PREFIX}${tool.name}`,
+				piTool: tool.name,
 				exposure,
 				category,
 				profile: TOOL_SURFACE_PROFILE,
@@ -924,7 +915,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 	const registerToolsFromCatalog = (client: SoloMcpClient) => {
 		for (const tool of client.tools) {
 			if (getMcpToolExposure(tool.name) !== "direct") continue;
-			const piName = `${TOOL_PREFIX}${tool.name}`;
+			const piName = tool.name;
 			if (registered.has(piName)) continue;
 			registered.add(piName);
 
