@@ -42,6 +42,11 @@ const DISABLED_RETRY_MS = 30_000;
 // helper; quiet periods cost zero subprocesses.
 const HELPER_IDLE_CLOSE_MS = 5_000;
 
+// Braille spinner shown in the status line while the Solo helper is warming
+// up. 80ms feels lively without distracting — matches typical CLI spinners.
+const SPINNER_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+const SPINNER_INTERVAL_MS = 80;
+
 // -------------------------------------------------------------------------
 // JSON-RPC types
 
@@ -641,7 +646,48 @@ export default function soloExtension(pi: ExtensionAPI) {
 				`Solo: ${client.tools.length} tool${client.tools.length === 1 ? "" : "s"} now available`,
 				"info",
 			);
-			uiCtx.ui.setStatus("solo", `solo: ${client.tools.length}`);
+			pushStatus();
+		}
+	};
+
+	// Animated spinner state. While the helper is warming, a setInterval keeps
+	// re-rendering the status line so the user sees a moving indicator instead
+	// of a frozen "warming" string. Cleared the moment state leaves "warming".
+	let spinnerFrame = 0;
+	let spinnerTimer: NodeJS.Timeout | undefined;
+
+	const pushStatus = () => {
+		if (!uiCtx?.hasUI) return;
+		const theme = uiCtx.ui.theme;
+		let tag: string;
+		if (client.state === "warming") {
+			const dot = theme.fg("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!);
+			tag = `${dot} ${theme.fg("dim", "solo: connecting")}`;
+		} else if (client.state === "failed") {
+			tag = theme.fg("error", "solo: error");
+		} else if (client.isMcpDisabled()) {
+			tag = theme.fg("warning", "solo: disabled");
+		} else if (client.tools.length === 0) {
+			tag = theme.fg("dim", "solo: off");
+		} else {
+			tag = theme.fg("dim", `solo (${summarizeToolGroups(client.tools)})`);
+		}
+		uiCtx.ui.setStatus("solo", tag);
+	};
+
+	const syncSpinner = () => {
+		if (client.state === "warming") {
+			if (spinnerTimer) return;
+			spinnerFrame = 0;
+			spinnerTimer = setInterval(() => {
+				spinnerFrame = (spinnerFrame + 1) % SPINNER_FRAMES.length;
+				pushStatus();
+			}, SPINNER_INTERVAL_MS);
+			// Don't keep the Node event loop alive just for the spinner.
+			spinnerTimer.unref?.();
+		} else if (spinnerTimer) {
+			clearInterval(spinnerTimer);
+			spinnerTimer = undefined;
 		}
 	};
 
@@ -653,18 +699,13 @@ export default function soloExtension(pi: ExtensionAPI) {
 					? "Solo connected — but MCP is disabled in Solo settings"
 					: `Solo connected — ${c.tools.length} tool${c.tools.length === 1 ? "" : "s"} registered`;
 				uiCtx.ui.notify(msg, c.isMcpDisabled() ? "warning" : "info");
-				uiCtx.ui.setStatus("solo", c.isMcpDisabled() ? "solo: disabled" : `solo: ${c.tools.length}`);
 			}
+			syncSpinner();
+			pushStatus();
 		},
 		() => {
-			if (!uiCtx?.hasUI) return;
-			let tag: string;
-			if (client.state === "warming") tag = "solo: warming";
-			else if (client.state === "failed") tag = "solo: error";
-			else if (client.isMcpDisabled()) tag = "solo: disabled";
-			else if (client.tools.length === 0) tag = "solo: off";
-			else tag = `solo (${summarizeToolGroups(client.tools)})`;
-			uiCtx.ui.setStatus("solo", tag);
+			syncSpinner();
+			pushStatus();
 		},
 	);
 
@@ -676,6 +717,10 @@ export default function soloExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		if (spinnerTimer) {
+			clearInterval(spinnerTimer);
+			spinnerTimer = undefined;
+		}
 		client.stop();
 	});
 
