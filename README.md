@@ -37,27 +37,27 @@ The extension is auto-discovered. Run `/reload` if Pi is already running.
 
 1. Install Solo from <https://soloterm.com>.
 2. In Solo: `Cmd+,` → **MCP** tab → toggle MCP on.
-3. *(Optional)* Enable Todos, Scratchpads, Timers, Key-value in the same panel to expose those tool groups.
-4. *(Optional, recommended)* In Solo: `Cmd+,` → **Agents** tab → **Add tool**. Configure Pi as a Generic agent tool with command `pi`. This lets you spawn Pi sub-agents from inside Pi via `solo_spawn_process`.
+3. _(Optional)_ Enable Todos, Scratchpads, Timers, Key-value in the same panel to expose those tool groups.
+4. _(Optional, recommended)_ In Solo: `Cmd+,` → **Agents** tab → **Add tool**. Configure Pi as a Generic agent tool with command `pi`. This lets you spawn Pi sub-agents from inside Pi via `solo_spawn_process`.
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/solo` | Show connection status, tool count, bound project & process |
-| `/solo-tools` | List every Solo tool currently registered |
-| `/solo-refresh` | Re-query Solo for its current tool catalog (cheap) |
-| `/solo-reconnect` | Force-restart the helper |
-| `/solo-bind <process-id>` | Manually bind this Pi to a Solo process |
+| Command                   | Purpose                                                     |
+| ------------------------- | ----------------------------------------------------------- |
+| `/solo`                   | Show connection status, tool count, bound project & process |
+| `/solo-tools`             | List every Solo tool currently registered                   |
+| `/solo-refresh`           | Re-query Solo for its current tool catalog (cheap)          |
+| `/solo-reconnect`         | Force-restart the helper                                    |
+| `/solo-bind <process-id>` | Manually bind this Pi to a Solo process                     |
 
 ## Configuration
 
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `SOLO_MCP_HELPER` | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper |
-| `SOLOTERM_APP_DATA_DIR` | `~/.config/soloterm` | Solo's app data dir (passed through) |
-| `SOLO_PROCESS_ID` | — | If set, Pi auto-binds to that Solo process |
-| `PI_SOLO_DISABLED` | — | Set to `1` to disable the extension entirely |
+| Env var                 | Default                                     | Purpose                                      |
+| ----------------------- | ------------------------------------------- | -------------------------------------------- |
+| `SOLO_MCP_HELPER`       | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper                   |
+| `SOLOTERM_APP_DATA_DIR` | `~/.config/soloterm`                        | Solo's app data dir (passed through)         |
+| `SOLO_PROCESS_ID`       | —                                           | If set, Pi auto-binds to that Solo process   |
+| `PI_SOLO_DISABLED`      | —                                           | Set to `1` to disable the extension entirely |
 
 ## How it works under the hood
 
@@ -87,6 +87,9 @@ After successful `spawn_process` / `start_process` / `restart_process` / `get_pr
 pi-solo/
 ├── pi-extension/solo/index.ts   ← the extension source
 ├── test/test.ts                 ← unit tests (node:test)
+├── vite.config.ts               ← Vite+ config (fmt / lint / staged)
+├── .editorconfig                ← shared indent / line-ending rules
+├── .vite-hooks/pre-commit       ← runs `vp staged` on every commit
 ├── .pi/
 │   ├── settings.json            ← dev pointer: load the extension when pi runs in this repo
 │   └── skills/release/SKILL.md  ← release workflow
@@ -99,11 +102,19 @@ Mirrors the layout of [pi-interactive-subagents](https://github.com/HazAT/pi-int
 
 ## Development
 
+The project uses [**Vite+**](https://viteplus.dev) (`vp`) as the unified entry point for formatting, linting, and commit-hook orchestration. There is **no bundling** — the Pi extension is loaded directly as TypeScript at runtime — so `vp` only runs Oxfmt + Oxlint here, not Vite’s build pipeline.
+
 ```bash
-npm install                       # install dev dependencies
-npm test                          # run unit tests
-pi                                # run pi inside this repo — .pi/settings.json picks up the extension
+vp install      # install dev dependencies (npm under the hood)
+vp config       # install the .vite-hooks/_ pre-commit shim (once per clone)
+vp check        # format + lint the source tree
+vp check --fix  # auto-fix formatting and lint issues
+vp fmt          # run only Oxfmt
+vp lint         # run only Oxlint
+npm test        # run unit tests (node:test)
 ```
+
+On every commit, the installed pre-commit hook runs `vp staged`, which executes `vp check --fix` against just the files in the index — trivial formatting drift is auto-fixed and re-staged before the commit lands.
 
 To cut a release, ask Pi: “release 0.2.0” (the `.pi/skills/release/SKILL.md` skill drives the rest).
 

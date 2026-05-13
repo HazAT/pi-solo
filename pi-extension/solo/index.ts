@@ -25,8 +25,7 @@ import type { Readable, Writable } from "node:stream";
 
 const DEFAULT_HELPER = "/Applications/Solo.app/Contents/MacOS/mcp";
 const HELPER_PATH = process.env.SOLO_MCP_HELPER ?? DEFAULT_HELPER;
-const APP_DATA_DIR =
-	process.env.SOLOTERM_APP_DATA_DIR ?? join(homedir(), ".config", "soloterm");
+const APP_DATA_DIR = process.env.SOLOTERM_APP_DATA_DIR ?? join(homedir(), ".config", "soloterm");
 const SOLO_PROCESS_ID = process.env.SOLO_PROCESS_ID;
 const DISABLED = process.env.PI_SOLO_DISABLED === "1";
 
@@ -35,8 +34,6 @@ const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_NAME = "pi-solo-extension";
 const CLIENT_VERSION = "1.0.0";
 
-// When MCP is reachable but disabled in Solo, retry tools/list this often.
-const DISABLED_RETRY_MS = 30_000;
 // Idle window after which we close the helper subprocess so Solo's sidebar
 // stops showing it as a child of this Pi. Bursts of MCP calls reuse one warm
 // helper; quiet periods cost zero subprocesses.
@@ -44,7 +41,18 @@ const HELPER_IDLE_CLOSE_MS = 5_000;
 
 // Braille spinner shown in the status line while the Solo helper is warming
 // up. 80ms feels lively without distracting — matches typical CLI spinners.
-const SPINNER_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+const SPINNER_FRAMES = [
+	"\u280b",
+	"\u2819",
+	"\u2839",
+	"\u2838",
+	"\u283c",
+	"\u2834",
+	"\u2826",
+	"\u2827",
+	"\u2807",
+	"\u280f",
+];
 const SPINNER_INTERVAL_MS = 80;
 
 // -------------------------------------------------------------------------
@@ -112,14 +120,6 @@ interface WhoamiResult {
 }
 
 // -------------------------------------------------------------------------
-// Pending tool registration
-
-interface PendingTool {
-	mcpName: string;
-	pi: any; // ExtensionAPI's registerTool definition (loosely typed)
-}
-
-// -------------------------------------------------------------------------
 // MCP client over the bundled stdio helper
 
 class SoloMcpClient {
@@ -144,10 +144,7 @@ class SoloMcpClient {
 	private onReady: (client: SoloMcpClient) => void | Promise<void>;
 	private onStateChange: () => void;
 
-	constructor(
-		onReady: (client: SoloMcpClient) => void | Promise<void>,
-		onStateChange: () => void,
-	) {
+	constructor(onReady: (client: SoloMcpClient) => void | Promise<void>, onStateChange: () => void) {
 		this.onReady = onReady;
 		this.onStateChange = onStateChange;
 	}
@@ -576,10 +573,9 @@ export default function soloExtension(pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text" as const,
-									text:
-										client.isMcpDisabled()
-											? "Solo MCP is disabled in Solo settings (Integrations → MCP). Re-enable it and run /solo-reconnect."
-											: `Solo MCP not ready (state=${client.state}${client.lastError ? `: ${client.lastError}` : ""}).`,
+									text: client.isMcpDisabled()
+										? "Solo MCP is disabled in Solo settings (Integrations → MCP). Re-enable it and run /solo-reconnect."
+										: `Solo MCP not ready (state=${client.state}${client.lastError ? `: ${client.lastError}` : ""}).`,
 								},
 							],
 							isError: true,
@@ -604,10 +600,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 									: typeof data?.id === "number"
 										? data.id
 										: undefined;
-							const projectId =
-								data?.project_id ??
-								(args as any)?.project_id ??
-								undefined;
+							const projectId = data?.project_id ?? (args as any)?.project_id ?? undefined;
 							if (processId != null) {
 								details.jumpHint = await computeJumpHint(
 									client,
@@ -797,10 +790,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 				await client.callTool("bind_session_process", { process_id: processId });
 				ctx.ui.notify(`Bound to Solo process ${processId}`, "info");
 			} catch (err) {
-				ctx.ui.notify(
-					`Bind failed: ${err instanceof Error ? err.message : String(err)}`,
-					"error",
-				);
+				ctx.ui.notify(`Bind failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
 		},
 	});
@@ -942,8 +932,7 @@ async function computeJumpHint(
 }
 
 function extractStructuredOrText(r: McpToolCallResult): any {
-	if (r.structuredContent !== undefined && r.structuredContent !== null)
-		return r.structuredContent;
+	if (r.structuredContent !== undefined && r.structuredContent !== null) return r.structuredContent;
 	return extractTextJson<any>(r);
 }
 
@@ -997,13 +986,17 @@ export function pickSubject(name: string, args: ToolArgs): string {
 }
 
 export function markerFor(name: string): string {
-	if (/^spawn_/.test(name)) return "\u25b8"; // ▸ create/spawn
+	if (name.startsWith("spawn_")) return "\u25b8"; // ▸ create/spawn
 	if (/^close_|^delete|_delete$|^stop_/.test(name)) return "\u2718"; // ✘ destructive
-	if (/^send_input/.test(name)) return "\u23f5"; // ⏵ send
+	if (name.startsWith("send_input")) return "\u23f5"; // ⏵ send
 	if (/^restart|reload|refresh|wait_for/.test(name)) return "\u21bb"; // ↻ restart
-	if (/^start_/.test(name)) return "\u25b6"; // ▶ start
+	if (name.startsWith("start_")) return "\u25b6"; // ▶ start
 	if (/^list_|_list$|^get_|^search_|^whoami|^lock_status/.test(name)) return "\u25cb"; // ○ read
-	if (/_write$|_update|_create|_rename|_add_|_remove_|_set|_tag|_complete|_archive|_transfer|_load|_save|_clear|register_/.test(name))
+	if (
+		/_write$|_update|_create|_rename|_add_|_remove_|_set|_tag|_complete|_archive|_transfer|_load|_save|_clear|register_/.test(
+			name,
+		)
+	)
 		return "\u270e"; // ✎ write
 	return "\u00b7"; // · default
 }
@@ -1018,9 +1011,7 @@ function makeRenderers(mcpName: string): {
 		renderCall(args, theme) {
 			const subject = pickSubject(mcpName, args);
 			let text =
-				theme.fg("accent", marker) +
-				" " +
-				theme.fg("toolTitle", theme.bold(`solo ${mcpName}`));
+				theme.fg("accent", marker) + " " + theme.fg("toolTitle", theme.bold(`solo ${mcpName}`));
 
 			if (subject && subject !== mcpName) {
 				text += " " + theme.fg("accent", subject);
@@ -1042,8 +1033,7 @@ function makeRenderers(mcpName: string): {
 			if (typeof args.status === "string") hints.push(String(args.status));
 			if (typeof args.delay_ms === "number") hints.push(`${args.delay_ms}ms`);
 			if (typeof args.max_wait_ms === "number") hints.push(`<= ${args.max_wait_ms}ms`);
-			if (typeof args.lease_ttl_seconds === "number")
-				hints.push(`ttl=${args.lease_ttl_seconds}s`);
+			if (typeof args.lease_ttl_seconds === "number") hints.push(`ttl=${args.lease_ttl_seconds}s`);
 			if (Array.isArray(args.tags) && args.tags.length) hints.push(`tags=${args.tags.join(",")}`);
 			if (typeof args.wait_ms === "number") hints.push(`wait=${args.wait_ms}ms`);
 			if (typeof args.lines === "number") hints.push(`${args.lines}L`);
@@ -1102,22 +1092,19 @@ function makeRenderers(mcpName: string): {
 				// todo create
 				else if (typeof d.todo_id === "number" && d.completed == null) {
 					summary = `todo #${d.todo_id}`;
-				}
-				else if (typeof d.todo_id === "number" && typeof d.completed === "boolean") {
+				} else if (typeof d.todo_id === "number" && typeof d.completed === "boolean") {
 					summary = `todo #${d.todo_id} \u00b7 ${d.completed ? "completed" : "reopened"}`;
 				}
 				// list responses
 				else if (Array.isArray(d)) {
 					summary = `${d.length} items`;
-				}
-				else if (Array.isArray(d.scratchpads)) summary = `${d.scratchpads.length} scratchpads`;
+				} else if (Array.isArray(d.scratchpads)) summary = `${d.scratchpads.length} scratchpads`;
 				else if (Array.isArray(d.todos)) summary = `${d.todos.length} todos`;
 				else if (Array.isArray(d.processes)) summary = `${d.processes.length} processes`;
 				else if (Array.isArray(d.tools)) summary = `${d.tools.length} tools`;
 				else if (Array.isArray(d.timers)) summary = `${d.timers.length} timers`;
 				else if (Array.isArray(d.tags)) summary = `${d.tags.length} tags`;
-				else if (Array.isArray(d.matches))
-					summary = `${d.matches.length} matches`;
+				else if (Array.isArray(d.matches)) summary = `${d.matches.length} matches`;
 				// process status / generic
 				else if (typeof d.status === "string" && d.id != null) {
 					summary = `${d.name ?? `#${d.id}`} \u00b7 ${d.status}`;
@@ -1140,7 +1127,8 @@ function makeRenderers(mcpName: string): {
 				}
 				// locks
 				else if (typeof d.lock_key === "string") {
-					if (d.released != null) summary = `${d.lock_key} \u00b7 ${d.released ? "released" : "not owned"}`;
+					if (d.released != null)
+						summary = `${d.lock_key} \u00b7 ${d.released ? "released" : "not owned"}`;
 					else if (d.acquired != null)
 						summary = `${d.lock_key} \u00b7 ${d.acquired ? "acquired" : "busy"}`;
 					else summary = d.lock_key;

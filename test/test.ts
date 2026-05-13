@@ -179,10 +179,9 @@ test("mcpContentToPi — empty/missing → placeholder", () => {
 });
 
 test("mcpContentToPi — passes through text", () => {
-	assert.deepEqual(
-		mcpContentToPi([{ type: "text", text: "hello" }]),
-		[{ type: "text", text: "hello" }],
-	);
+	assert.deepEqual(mcpContentToPi([{ type: "text", text: "hello" }]), [
+		{ type: "text", text: "hello" },
+	]);
 });
 
 test("mcpContentToPi — replaces image with placeholder", () => {
