@@ -241,31 +241,47 @@ test("smoke — extension module exports default function", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Solo-native subagents: agent definition parsing
+// Solo-native subagents: agent definitions, task wrapping, wake-up timers
 
 import {
 	__test__ as subagents,
 	buildArtifactScratchpadName,
+	buildWakeBody,
 	buildWrappedTask,
 	parseAgentDefinition,
-	resolveDenyTools,
 	resolveEffectiveInteractive,
-	resolveEffectiveSessionMode,
-	resolveLaunchBehavior,
-	resolveResultPresentation,
 } from "../pi-extension/solo/subagents/index.ts";
 import {
-	SENTINEL_RE,
-	interpretExitSidecar,
-	shellEscape,
+	resetResolvedPiAgentToolIdForTests,
+	resolvePiAgentToolId,
+	scheduleIdleWake,
+	waitForAgentBusy,
+	waitForAgentReady,
 } from "../pi-extension/solo/subagents/solo-surface.ts";
-import { findLastAssistantMessage } from "../pi-extension/solo/subagents/session.ts";
+
+function mockClient(handlers: Record<string, any>) {
+	const calls: Array<{ name: string; args: unknown }> = [];
+	return {
+		calls,
+		async callTool(name: string, args: unknown) {
+			calls.push({ name, args });
+			const handler = handlers[name];
+			if (typeof handler === "function") return await handler(args, calls.length);
+			if (handler) return handler;
+			throw new Error(`unexpected tool call: ${name}`);
+		},
+	};
+}
+
+function structured(value: unknown) {
+	return { structuredContent: value };
+}
 
 test("parseAgentDefinition — returns null without frontmatter", () => {
 	assert.equal(parseAgentDefinition("# no frontmatter here", "foo"), null);
 });
 
-test("parseAgentDefinition — reads name, model, tools, body", () => {
+test("parseAgentDefinition — reads honored fields and tolerates ignored v1 fields", () => {
 	const src = `---
 name: scout
 description: fast reconnaissance
@@ -302,68 +318,41 @@ Body`;
 	assert.equal(def.name, "fallback-name");
 });
 
-// ---------------------------------------------------------------------------
-// resolveDenyTools
-
-test("resolveDenyTools — spawning:false hides all spawning tools", () => {
-	const denied = resolveDenyTools({ spawning: false });
-	assert.ok(denied.has("solo_subagent"));
-	assert.ok(denied.has("solo_subagent_interrupt"));
-	assert.ok(denied.has("solo_subagents_list"));
-	assert.ok(denied.has("solo_subagent_resume"));
+test("parseAgentDefinition — reads interactive true", () => {
+	const def = parseAgentDefinition("---\ninteractive: true\n---\nBody", "planner")!;
+	assert.equal(def.interactive, true);
 });
 
-test("resolveDenyTools — deny-tools list adds names", () => {
-	const denied = resolveDenyTools({ denyTools: "claude, write" });
-	assert.deepEqual([...denied].sort(), ["claude", "write"]);
-});
-
-test("resolveDenyTools — null defaults to empty", () => {
-	assert.equal(resolveDenyTools(null).size, 0);
+test("parseAgentDefinition — reads output false as tolerated string", () => {
+	const def = parseAgentDefinition("---\noutput: false\n---\nBody", "noop")!;
+	assert.equal(def.output, "false");
 });
 
 // ---------------------------------------------------------------------------
-// resolveEffectiveSessionMode / resolveLaunchBehavior / interactive
-
-test("resolveEffectiveSessionMode — fork param wins", () => {
-	assert.equal(resolveEffectiveSessionMode({ fork: true }, { sessionMode: "standalone" }), "fork");
-});
-
-test("resolveEffectiveSessionMode — falls through to agent default", () => {
-	assert.equal(resolveEffectiveSessionMode({}, { sessionMode: "lineage-only" }), "lineage-only");
-});
-
-test("resolveEffectiveSessionMode — standalone when nothing specified", () => {
-	assert.equal(resolveEffectiveSessionMode({}, null), "standalone");
-});
-
-test("resolveLaunchBehavior — standalone uses artifact handoff", () => {
-	const lb = resolveLaunchBehavior({}, null);
-	assert.equal(lb.sessionMode, "standalone");
-	assert.equal(lb.taskDelivery, "artifact");
-	assert.equal(lb.inheritsConversationContext, false);
-	assert.equal(lb.seededSessionMode, null);
-});
-
-test("resolveLaunchBehavior — fork inherits context and uses direct delivery", () => {
-	const lb = resolveLaunchBehavior({ fork: true }, null);
-	assert.equal(lb.taskDelivery, "direct");
-	assert.equal(lb.inheritsConversationContext, true);
-	assert.equal(lb.seededSessionMode, "fork");
-});
+// effective interactivity / scratchpad defaults
 
 test("resolveEffectiveInteractive — param wins over agent", () => {
 	assert.equal(resolveEffectiveInteractive({ interactive: false }, { interactive: true }), false);
+	assert.equal(resolveEffectiveInteractive({ interactive: true }, { interactive: false }), true);
 });
 
-test("resolveEffectiveInteractive — inverse of auto-exit by default", () => {
-	assert.equal(resolveEffectiveInteractive({}, { autoExit: true }), false);
-	assert.equal(resolveEffectiveInteractive({}, { autoExit: false }), true);
-	assert.equal(resolveEffectiveInteractive({}, null), true);
+test("resolveEffectiveInteractive — defaults to autonomous", () => {
+	assert.equal(resolveEffectiveInteractive({}, { autoExit: false }), false);
+	assert.equal(resolveEffectiveInteractive({}, null), false);
+});
+
+test("wantsScratchpad — defaults to true", () => {
+	assert.equal(subagents.wantsScratchpad({}, null), true);
+});
+
+test("wantsScratchpad — output:false opts out unless param overrides", () => {
+	assert.equal(subagents.wantsScratchpad({}, { output: "false" }), false);
+	assert.equal(subagents.wantsScratchpad({ scratchpad: true }, { output: "false" }), true);
+	assert.equal(subagents.wantsScratchpad({ scratchpad: false }, null), false);
 });
 
 // ---------------------------------------------------------------------------
-// buildArtifactScratchpadName / buildWrappedTask
+// buildArtifactScratchpadName / buildWrappedTask / buildWakeBody
 
 test("buildArtifactScratchpadName — sanitizes agent + name", () => {
 	const stamped = buildArtifactScratchpadName("Planner!", "Refactor login flow");
@@ -375,162 +364,182 @@ test("buildArtifactScratchpadName — falls back when agent missing", () => {
 	assert.match(stamped, /^subagent\/\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-task$/i);
 });
 
-test("buildWrappedTask — omits artifact block without scratchpad", () => {
+test("buildWrappedTask — includes Solo instructions, role, task, and stop instruction", () => {
 	const wrapped = buildWrappedTask({
-		task: "do the thing",
-		roleBlock: "",
-		autoExit: true,
+		agentInstructions: "[SOLO ORCHESTRATION CONTEXT]",
+		roleBlock: "You are Scout.",
+		task: "Map the auth module.",
 	});
-	assert.match(wrapped, /Complete your task autonomously/);
+	assert.match(wrapped, /SOLO ORCHESTRATION CONTEXT/);
+	assert.match(wrapped, /You are Scout\./);
+	assert.match(wrapped, /Map the auth module\./);
+	assert.match(wrapped, /simply stop and wait/);
+	assert.doesNotMatch(wrapped, /subagent_done/);
+	assert.doesNotMatch(wrapped, /auto-exit/i);
+});
+
+test("buildWrappedTask — omits artifact block without scratchpad", () => {
+	const wrapped = buildWrappedTask({ task: "do the thing" });
 	assert.doesNotMatch(wrapped, /Artifact \(Solo scratchpad\)/);
 });
 
-test("buildWrappedTask — includes scratchpad block and forbids local files", () => {
+test("buildWrappedTask — includes scratchpad id and expected revision", () => {
 	const wrapped = buildWrappedTask({
 		task: "do the thing",
-		roleBlock: "",
-		autoExit: true,
 		artifactScratchpadName: "planner/2026-05-13-plan",
 		artifactScratchpadId: 42,
+		artifactScratchpadRevision: 3,
 	});
 	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
 	assert.match(wrapped, /planner\/2026-05-13-plan/);
 	assert.match(wrapped, /scratchpad_id: 42/);
-	assert.match(wrapped, /Do NOT save plans, specs, or context documents to local files/);
+	assert.match(wrapped, /expected_revision: 3/);
+	assert.doesNotMatch(wrapped, /subagent_done/);
 });
 
-test("buildWrappedTask — interactive variant tells the agent to call subagent_done", () => {
-	const wrapped = buildWrappedTask({
-		task: "do the thing",
-		roleBlock: "role",
-		autoExit: false,
+test("buildWrappedTask — interactive variant tells child to wait for continuation", () => {
+	const wrapped = buildWrappedTask({ task: "plan", interactive: true });
+	assert.match(wrapped, /interactive subagent/);
+	assert.match(wrapped, /wait in this pane/);
+});
+
+test("buildWakeBody — autonomous marker includes ids and close instruction", () => {
+	const body = buildWakeBody({
+		subagentName: "E2E Worker",
+		agent: "worker",
+		processId: 32,
+		scratchpadId: 4,
+		scratchpadName: "worker/result",
+		interactive: false,
 	});
-	assert.match(wrapped, /call the subagent_done tool/);
+	assert.match(
+		body,
+		/^\[pi-solo:subagent-done id=32 scratchpad=4 name="E2E Worker" agent="worker"\]/,
+	);
+	assert.match(body, /solo_scratchpad_read\(scratchpad_id=4\)/);
+	assert.match(body, /solo_close_process\(process_id=32\)/);
+});
+
+test("buildWakeBody — interactive marker tells parent not to close", () => {
+	const body = buildWakeBody({
+		subagentName: "Planner",
+		processId: 12,
+		scratchpadName: "planner/spec",
+		interactive: true,
+	});
+	assert.match(body, /^\[pi-solo:subagent-interactive-ready id=12 name="Planner"\]/);
+	assert.match(body, /Do not close this pane automatically/);
+	assert.doesNotMatch(body, /solo_close_process/);
+});
+
+test("buildWakeBody — escapes marker quotes", () => {
+	const body = buildWakeBody({ subagentName: 'A "quoted" name', processId: 1, interactive: false });
+	assert.match(body, /name="A \\"quoted\\" name"/);
 });
 
 // ---------------------------------------------------------------------------
-// resolveResultPresentation
+// solo-surface helpers
 
-test("resolveResultPresentation — success path mentions elapsed and summary", () => {
-	const out = resolveResultPresentation(
-		{ exitCode: 0, elapsed: 73, summary: "Did the thing", sessionFile: "/tmp/s.jsonl" },
-		"Scout",
-	);
-	assert.match(out, /Sub-agent "Scout" completed \(1m 13s\)\./);
-	assert.match(out, /Did the thing/);
-	assert.match(out, /Session: \/tmp\/s\.jsonl/);
+test("resolvePiAgentToolId — selects enabled tool whose command is pi", async () => {
+	resetResolvedPiAgentToolIdForTests();
+	const client = mockClient({
+		list_agent_tools: structured([
+			{ id: 2, name: "Other", command: "other", enabled: true },
+			{ id: 8, name: "Pi", command: "pi", enabled: true },
+		]),
+	});
+	assert.equal(await resolvePiAgentToolId(client), 8);
 });
 
-test("resolveResultPresentation — error path surfaces errorMessage", () => {
-	const out = resolveResultPresentation(
-		{ exitCode: 1, elapsed: 4, summary: "", errorMessage: "overload" },
-		"Scout",
-	);
-	assert.match(out, /failed after 4s/);
-	assert.match(out, /Error: overload/);
-	assert.match(out, /solo_subagent_resume/);
+test("resolvePiAgentToolId — falls back to tool named Pi", async () => {
+	resetResolvedPiAgentToolIdForTests();
+	const client = mockClient({
+		list_agent_tools: structured([{ id: 9, name: "Pi", command: "wrapped-pi", enabled: true }]),
+	});
+	assert.equal(await resolvePiAgentToolId(client), 9);
 });
 
-test("resolveResultPresentation — includes scratchpad reference", () => {
-	const out = resolveResultPresentation(
-		{
-			exitCode: 0,
-			elapsed: 5,
-			summary: "done",
-			artifactScratchpadName: "planner/foo",
-			artifactScratchpadId: 9,
-		},
-		"Planner",
-	);
-	assert.match(out, /Artifact scratchpad: planner\/foo \(id 9\)/);
+test("resolvePiAgentToolId — ignores disabled Pi tool", async () => {
+	resetResolvedPiAgentToolIdForTests();
+	const client = mockClient({
+		list_agent_tools: structured([{ id: 1, name: "Pi", command: "pi", enabled: false }]),
+	});
+	await assert.rejects(() => resolvePiAgentToolId(client), /add a Generic agent tool/);
 });
 
-// ---------------------------------------------------------------------------
-// interpretExitSidecar + SENTINEL_RE
+test("resolvePiAgentToolId — caches after first lookup", async () => {
+	resetResolvedPiAgentToolIdForTests();
+	const client = mockClient({
+		list_agent_tools: structured([{ id: 8, name: "Pi", command: "pi", enabled: true }]),
+	});
+	assert.equal(await resolvePiAgentToolId(client), 8);
+	assert.equal(await resolvePiAgentToolId(client), 8);
+	assert.equal(client.calls.filter((call) => call.name === "list_agent_tools").length, 1);
+});
 
-test("interpretExitSidecar — done", () => {
-	assert.deepEqual(interpretExitSidecar({ type: "done" }), {
-		reason: "done",
-		exitCode: 0,
+test("scheduleIdleWake — returns timer id for scheduled timer", async () => {
+	const client = mockClient({
+		timer_fire_when_idle_any: structured({ timer_id: 12, status: "scheduled" }),
+	});
+	const result = await scheduleIdleWake(client, 32, 1000, "body");
+	assert.equal(result.timerId, 12);
+	assert.equal(result.alreadySatisfied, false);
+	assert.deepEqual(client.calls[0], {
+		name: "timer_fire_when_idle_any",
+		args: { processes: [32], max_wait_ms: 1000, body: "body" },
 	});
 });
 
-test("interpretExitSidecar — ping carries name + message", () => {
-	const r = interpretExitSidecar({ type: "ping", name: "scout", message: "stuck" });
-	assert.equal(r.reason, "ping");
-	assert.deepEqual(r.ping, { name: "scout", message: "stuck" });
+test("scheduleIdleWake — treats missing timer as already satisfied", async () => {
+	const client = mockClient({
+		timer_fire_when_idle_any: structured({ status: "already_satisfied" }),
+	});
+	const result = await scheduleIdleWake(client, 32, 1000, "body");
+	assert.equal(result.timerId, undefined);
+	assert.equal(result.alreadySatisfied, true);
 });
 
-test("interpretExitSidecar — error falls back to default message", () => {
-	const r = interpretExitSidecar({ type: "error" });
-	assert.equal(r.reason, "error");
-	assert.equal(r.exitCode, 1);
-	assert.match(r.errorMessage ?? "", /no errorMessage/);
-});
-
-test("interpretExitSidecar — unknown type defaults to done", () => {
-	assert.equal(interpretExitSidecar({ type: "weird" }).reason, "done");
-});
-
-test("SENTINEL_RE — matches the shell-echoed sentinel", () => {
-	const m = "some screen output\n__SUBAGENT_DONE_137__\n".match(SENTINEL_RE);
-	assert.ok(m);
-	assert.equal(m![1], "137");
-});
-
-// ---------------------------------------------------------------------------
-// shellEscape
-
-test("shellEscape — wraps simple string in quotes", () => {
-	assert.equal(shellEscape("foo"), "'foo'");
-});
-
-test("shellEscape — escapes embedded single quotes", () => {
-	assert.equal(shellEscape("it's fine"), "'it'\\''s fine'");
-});
-
-// ---------------------------------------------------------------------------
-// findLastAssistantMessage
-
-test("findLastAssistantMessage — picks latest assistant text", () => {
-	const entries = [
-		{
-			type: "message",
-			id: "1",
-			message: { role: "user", content: [{ type: "text", text: "hi" }] },
+test("waitForAgentReady — resolves when agent_state.idle flips true", async () => {
+	let count = 0;
+	const client = mockClient({
+		get_process_status: () => {
+			count += 1;
+			return structured({ agent_state: { idle: count >= 2 } });
 		},
-		{
-			type: "message",
-			id: "2",
-			message: { role: "assistant", content: [{ type: "text", text: "first" }] },
-		},
-		{
-			type: "message",
-			id: "3",
-			message: { role: "assistant", content: [{ type: "text", text: "final" }] },
-		},
-	];
-	assert.equal(findLastAssistantMessage(entries as any), "final");
+	});
+	await waitForAgentReady(client, 5, { initialDelayMs: 0, intervalMs: 1, timeoutMs: 100 });
+	assert.equal(count, 2);
 });
 
-test("findLastAssistantMessage — falls back to errorMessage on stopReason=error", () => {
-	const entries = [
-		{
-			type: "message",
-			id: "1",
-			message: {
-				role: "assistant",
-				content: [],
-				stopReason: "error",
-				errorMessage: "overloaded",
-			},
-		},
-	];
-	assert.equal(findLastAssistantMessage(entries as any), "Subagent error: overloaded");
+test("waitForAgentReady — times out with process id in error", async () => {
+	const client = mockClient({ get_process_status: structured({ agent_state: { idle: false } }) });
+	await assert.rejects(
+		() => waitForAgentReady(client, 77, { initialDelayMs: 0, intervalMs: 1, timeoutMs: 5 }),
+		/agent #77/,
+	);
 });
 
-test("findLastAssistantMessage — null when no assistant messages", () => {
-	assert.equal(findLastAssistantMessage([]), null);
+test("waitForAgentBusy — resolves true when idle flips false", async () => {
+	let count = 0;
+	const client = mockClient({
+		get_process_status: () => {
+			count += 1;
+			return structured({ agent_state: { idle: count < 2 } });
+		},
+	});
+	assert.equal(
+		await waitForAgentBusy(client, 5, { initialDelayMs: 0, intervalMs: 1, timeoutMs: 100 }),
+		true,
+	);
+	assert.equal(count, 2);
+});
+
+test("waitForAgentBusy — returns false when process stays idle", async () => {
+	const client = mockClient({ get_process_status: structured({ agent_state: { idle: true } }) });
+	assert.equal(
+		await waitForAgentBusy(client, 5, { initialDelayMs: 0, intervalMs: 1, timeoutMs: 5 }),
+		false,
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -541,35 +550,24 @@ test("labelForSurface — prefixes with agent badge", () => {
 	assert.match(subagents.labelForSurface("Refactor"), /^🤖 Refactor$/);
 });
 
-test("buildPiPromptArgs — prepends empty separator when artifact handoff + skills", () => {
-	const args = subagents.buildPiPromptArgs({
-		effectiveSkills: "commit, release",
-		taskDelivery: "artifact",
-		taskArg: "@/tmp/task.md",
-	});
-	assert.deepEqual(args, ["", "/skill:commit", "/skill:release", "@/tmp/task.md"]);
+test("parseWakeMarker — recognizes autonomous wake marker", () => {
+	assert.deepEqual(
+		subagents.parseWakeMarker('[pi-solo:subagent-done id=44 scratchpad=9 name="x"]'),
+		{
+			processId: 44,
+		},
+	);
 });
 
-test("buildPiPromptArgs — direct delivery doesn't prepend separator", () => {
-	const args = subagents.buildPiPromptArgs({
-		effectiveSkills: "commit",
-		taskDelivery: "direct",
-		taskArg: "do the thing",
-	});
-	assert.deepEqual(args, ["/skill:commit", "do the thing"]);
+test("parseWakeMarker — recognizes interactive wake marker", () => {
+	assert.deepEqual(
+		subagents.parseWakeMarker('[pi-solo:subagent-interactive-ready id=45 name="x"]'),
+		{ processId: 45 },
+	);
 });
 
-test("buildSubagentToolAllowlist — always preserves subagent_done + caller_ping", () => {
-	const allow = subagents.buildSubagentToolAllowlist("read, bash");
-	assert.match(allow!, /read/);
-	assert.match(allow!, /bash/);
-	assert.match(allow!, /subagent_done/);
-	assert.match(allow!, /caller_ping/);
-});
-
-test("buildSubagentToolAllowlist — null when no tools requested", () => {
-	assert.equal(subagents.buildSubagentToolAllowlist(undefined), null);
-	assert.equal(subagents.buildSubagentToolAllowlist(""), null);
+test("parseWakeMarker — returns null for ordinary input", () => {
+	assert.equal(subagents.parseWakeMarker("hello"), null);
 });
 
 test("resolveInterruptTarget — error when no id/name", () => {
