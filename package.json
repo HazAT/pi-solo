@@ -1,0 +1,36 @@
+{
+  "name": "pi-solo",
+  "version": "0.1.0",
+  "description": "Pi extension for Solo (soloterm.com) — registers every Solo MCP tool as a first-class Pi tool, auto-binds to SOLO_PROCESS_ID, idle-closes the helper so it stays out of Solo's process tree, and renders Solo keyboard shortcuts on spawn/start/restart/status results.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "soloterm",
+    "solo",
+    "mcp",
+    "agents"
+  ],
+  "license": "MIT",
+  "author": "HazAT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HazAT/pi-solo"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./pi-extension/solo/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0"
+  }
+}
