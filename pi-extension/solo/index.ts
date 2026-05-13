@@ -20,6 +20,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
+import { initSoloSubagents } from "./subagents/index.ts";
+
 // -------------------------------------------------------------------------
 // Configuration
 
@@ -33,6 +35,34 @@ const TOOL_PREFIX = "solo_";
 const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_NAME = "pi-solo-extension";
 const CLIENT_VERSION = "1.0.0";
+
+// Opt-in: suppress generic Solo process-management tools when the higher-
+// level subagent tools (`solo_subagent`, `solo_subagent_interrupt`, …) are
+// available. The LLM should reach for `solo_subagent` instead of stitching
+// together `solo_spawn_process` + `solo_send_input` for agent work.
+const HIDE_PROCESS_TOOLS = process.env.PI_SOLO_HIDE_PROCESS_TOOLS === "1";
+const PROCESS_TOOLS_HIDDEN_WHEN_SET = new Set([
+	"spawn_process",
+	"send_input",
+	"list_agent_tools",
+	"close_process",
+	"rename_process",
+	"stop_process",
+	"start_process",
+	"restart_process",
+	"start_all_commands",
+	"stop_all_commands",
+	"restart_all_commands",
+	"register_agent",
+	"clear_output",
+	"flush_terminal_perf",
+	"select_process",
+]);
+
+function shouldHideMcpTool(mcpName: string): boolean {
+	if (!HIDE_PROCESS_TOOLS) return false;
+	return PROCESS_TOOLS_HIDDEN_WHEN_SET.has(mcpName);
+}
 
 // Idle window after which we close the helper subprocess so Solo's sidebar
 // stops showing it as a child of this Pi. Bursts of MCP calls reuse one warm
@@ -553,6 +583,13 @@ export default function soloExtension(pi: ExtensionAPI) {
 		for (const tool of client.tools) {
 			const piName = `${TOOL_PREFIX}${tool.name}`;
 			if (registered.has(piName)) continue;
+			if (shouldHideMcpTool(tool.name)) {
+				// PI_SOLO_HIDE_PROCESS_TOOLS=1 hides the generic process-management
+				// tools so the LLM reaches for solo_subagent instead. Mark as
+				// registered so we don't keep skipping them on every refresh.
+				registered.add(piName);
+				continue;
+			}
 			registered.add(piName);
 
 			const parameters = normalizeInputSchema(tool.inputSchema);
@@ -701,6 +738,15 @@ export default function soloExtension(pi: ExtensionAPI) {
 			pushStatus();
 		},
 	);
+
+	// Hook up the Solo-native subagent module. We pass the live SoloMcpClient
+	// in so subagents can call spawn_process / send_input / scratchpad_write
+	// without re-warming a second helper. Subagents are tool-gated on PI_DENY_TOOLS
+	// internally so spawning: false agents still get their tools hidden.
+	initSoloSubagents(pi, {
+		client,
+		isClientReady: () => client.isReady() && !client.isMcpDisabled(),
+	});
 
 	// --- Lifecycle ----------------------------------------------------------
 

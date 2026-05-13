@@ -239,3 +239,345 @@ test("smoke — extension module exports default function", async () => {
 	const mod = await import("../pi-extension/solo/index.ts");
 	assert.equal(typeof mod.default, "function", "expected default export to be a factory function");
 });
+
+// ---------------------------------------------------------------------------
+// Solo-native subagents: agent definition parsing
+
+import {
+	__test__ as subagents,
+	buildArtifactScratchpadName,
+	buildWrappedTask,
+	parseAgentDefinition,
+	resolveDenyTools,
+	resolveEffectiveInteractive,
+	resolveEffectiveSessionMode,
+	resolveLaunchBehavior,
+	resolveResultPresentation,
+} from "../pi-extension/solo/subagents/index.ts";
+import {
+	SENTINEL_RE,
+	interpretExitSidecar,
+	shellEscape,
+} from "../pi-extension/solo/subagents/solo-surface.ts";
+import { findLastAssistantMessage } from "../pi-extension/solo/subagents/session.ts";
+
+test("parseAgentDefinition — returns null without frontmatter", () => {
+	assert.equal(parseAgentDefinition("# no frontmatter here", "foo"), null);
+});
+
+test("parseAgentDefinition — reads name, model, tools, body", () => {
+	const src = `---
+name: scout
+description: fast reconnaissance
+model: anthropic/claude-haiku-4-5
+tools: read, bash
+auto-exit: true
+spawning: false
+output: context.md
+system-prompt: append
+---
+
+# Scout Agent
+
+Body goes here.
+`;
+	const def = parseAgentDefinition(src, "scout")!;
+	assert.equal(def.name, "scout");
+	assert.equal(def.description, "fast reconnaissance");
+	assert.equal(def.model, "anthropic/claude-haiku-4-5");
+	assert.equal(def.tools, "read, bash");
+	assert.equal(def.autoExit, true);
+	assert.equal(def.spawning, false);
+	assert.equal(def.output, "context.md");
+	assert.equal(def.systemPromptMode, "append");
+	assert.match(def.body ?? "", /Body goes here/);
+});
+
+test("parseAgentDefinition — fallback name when frontmatter omits it", () => {
+	const src = `---
+description: nameless
+---
+Body`;
+	const def = parseAgentDefinition(src, "fallback-name")!;
+	assert.equal(def.name, "fallback-name");
+});
+
+// ---------------------------------------------------------------------------
+// resolveDenyTools
+
+test("resolveDenyTools — spawning:false hides all spawning tools", () => {
+	const denied = resolveDenyTools({ spawning: false });
+	assert.ok(denied.has("solo_subagent"));
+	assert.ok(denied.has("solo_subagent_interrupt"));
+	assert.ok(denied.has("solo_subagents_list"));
+	assert.ok(denied.has("solo_subagent_resume"));
+});
+
+test("resolveDenyTools — deny-tools list adds names", () => {
+	const denied = resolveDenyTools({ denyTools: "claude, write" });
+	assert.deepEqual([...denied].sort(), ["claude", "write"]);
+});
+
+test("resolveDenyTools — null defaults to empty", () => {
+	assert.equal(resolveDenyTools(null).size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// resolveEffectiveSessionMode / resolveLaunchBehavior / interactive
+
+test("resolveEffectiveSessionMode — fork param wins", () => {
+	assert.equal(resolveEffectiveSessionMode({ fork: true }, { sessionMode: "standalone" }), "fork");
+});
+
+test("resolveEffectiveSessionMode — falls through to agent default", () => {
+	assert.equal(resolveEffectiveSessionMode({}, { sessionMode: "lineage-only" }), "lineage-only");
+});
+
+test("resolveEffectiveSessionMode — standalone when nothing specified", () => {
+	assert.equal(resolveEffectiveSessionMode({}, null), "standalone");
+});
+
+test("resolveLaunchBehavior — standalone uses artifact handoff", () => {
+	const lb = resolveLaunchBehavior({}, null);
+	assert.equal(lb.sessionMode, "standalone");
+	assert.equal(lb.taskDelivery, "artifact");
+	assert.equal(lb.inheritsConversationContext, false);
+	assert.equal(lb.seededSessionMode, null);
+});
+
+test("resolveLaunchBehavior — fork inherits context and uses direct delivery", () => {
+	const lb = resolveLaunchBehavior({ fork: true }, null);
+	assert.equal(lb.taskDelivery, "direct");
+	assert.equal(lb.inheritsConversationContext, true);
+	assert.equal(lb.seededSessionMode, "fork");
+});
+
+test("resolveEffectiveInteractive — param wins over agent", () => {
+	assert.equal(resolveEffectiveInteractive({ interactive: false }, { interactive: true }), false);
+});
+
+test("resolveEffectiveInteractive — inverse of auto-exit by default", () => {
+	assert.equal(resolveEffectiveInteractive({}, { autoExit: true }), false);
+	assert.equal(resolveEffectiveInteractive({}, { autoExit: false }), true);
+	assert.equal(resolveEffectiveInteractive({}, null), true);
+});
+
+// ---------------------------------------------------------------------------
+// buildArtifactScratchpadName / buildWrappedTask
+
+test("buildArtifactScratchpadName — sanitizes agent + name", () => {
+	const stamped = buildArtifactScratchpadName("Planner!", "Refactor login flow");
+	assert.match(stamped, /^planner\/\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-refactor-login-flow$/i);
+});
+
+test("buildArtifactScratchpadName — falls back when agent missing", () => {
+	const stamped = buildArtifactScratchpadName(undefined, "");
+	assert.match(stamped, /^subagent\/\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-task$/i);
+});
+
+test("buildWrappedTask — omits artifact block without scratchpad", () => {
+	const wrapped = buildWrappedTask({
+		task: "do the thing",
+		roleBlock: "",
+		autoExit: true,
+	});
+	assert.match(wrapped, /Complete your task autonomously/);
+	assert.doesNotMatch(wrapped, /Artifact \(Solo scratchpad\)/);
+});
+
+test("buildWrappedTask — includes scratchpad block and forbids local files", () => {
+	const wrapped = buildWrappedTask({
+		task: "do the thing",
+		roleBlock: "",
+		autoExit: true,
+		artifactScratchpadName: "planner/2026-05-13-plan",
+		artifactScratchpadId: 42,
+	});
+	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
+	assert.match(wrapped, /planner\/2026-05-13-plan/);
+	assert.match(wrapped, /scratchpad_id: 42/);
+	assert.match(wrapped, /Do NOT save plans, specs, or context documents to local files/);
+});
+
+test("buildWrappedTask — interactive variant tells the agent to call subagent_done", () => {
+	const wrapped = buildWrappedTask({
+		task: "do the thing",
+		roleBlock: "role",
+		autoExit: false,
+	});
+	assert.match(wrapped, /call the subagent_done tool/);
+});
+
+// ---------------------------------------------------------------------------
+// resolveResultPresentation
+
+test("resolveResultPresentation — success path mentions elapsed and summary", () => {
+	const out = resolveResultPresentation(
+		{ exitCode: 0, elapsed: 73, summary: "Did the thing", sessionFile: "/tmp/s.jsonl" },
+		"Scout",
+	);
+	assert.match(out, /Sub-agent "Scout" completed \(1m 13s\)\./);
+	assert.match(out, /Did the thing/);
+	assert.match(out, /Session: \/tmp\/s\.jsonl/);
+});
+
+test("resolveResultPresentation — error path surfaces errorMessage", () => {
+	const out = resolveResultPresentation(
+		{ exitCode: 1, elapsed: 4, summary: "", errorMessage: "overload" },
+		"Scout",
+	);
+	assert.match(out, /failed after 4s/);
+	assert.match(out, /Error: overload/);
+	assert.match(out, /solo_subagent_resume/);
+});
+
+test("resolveResultPresentation — includes scratchpad reference", () => {
+	const out = resolveResultPresentation(
+		{
+			exitCode: 0,
+			elapsed: 5,
+			summary: "done",
+			artifactScratchpadName: "planner/foo",
+			artifactScratchpadId: 9,
+		},
+		"Planner",
+	);
+	assert.match(out, /Artifact scratchpad: planner\/foo \(id 9\)/);
+});
+
+// ---------------------------------------------------------------------------
+// interpretExitSidecar + SENTINEL_RE
+
+test("interpretExitSidecar — done", () => {
+	assert.deepEqual(interpretExitSidecar({ type: "done" }), {
+		reason: "done",
+		exitCode: 0,
+	});
+});
+
+test("interpretExitSidecar — ping carries name + message", () => {
+	const r = interpretExitSidecar({ type: "ping", name: "scout", message: "stuck" });
+	assert.equal(r.reason, "ping");
+	assert.deepEqual(r.ping, { name: "scout", message: "stuck" });
+});
+
+test("interpretExitSidecar — error falls back to default message", () => {
+	const r = interpretExitSidecar({ type: "error" });
+	assert.equal(r.reason, "error");
+	assert.equal(r.exitCode, 1);
+	assert.match(r.errorMessage ?? "", /no errorMessage/);
+});
+
+test("interpretExitSidecar — unknown type defaults to done", () => {
+	assert.equal(interpretExitSidecar({ type: "weird" }).reason, "done");
+});
+
+test("SENTINEL_RE — matches the shell-echoed sentinel", () => {
+	const m = "some screen output\n__SUBAGENT_DONE_137__\n".match(SENTINEL_RE);
+	assert.ok(m);
+	assert.equal(m![1], "137");
+});
+
+// ---------------------------------------------------------------------------
+// shellEscape
+
+test("shellEscape — wraps simple string in quotes", () => {
+	assert.equal(shellEscape("foo"), "'foo'");
+});
+
+test("shellEscape — escapes embedded single quotes", () => {
+	assert.equal(shellEscape("it's fine"), "'it'\\''s fine'");
+});
+
+// ---------------------------------------------------------------------------
+// findLastAssistantMessage
+
+test("findLastAssistantMessage — picks latest assistant text", () => {
+	const entries = [
+		{
+			type: "message",
+			id: "1",
+			message: { role: "user", content: [{ type: "text", text: "hi" }] },
+		},
+		{
+			type: "message",
+			id: "2",
+			message: { role: "assistant", content: [{ type: "text", text: "first" }] },
+		},
+		{
+			type: "message",
+			id: "3",
+			message: { role: "assistant", content: [{ type: "text", text: "final" }] },
+		},
+	];
+	assert.equal(findLastAssistantMessage(entries as any), "final");
+});
+
+test("findLastAssistantMessage — falls back to errorMessage on stopReason=error", () => {
+	const entries = [
+		{
+			type: "message",
+			id: "1",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage: "overloaded",
+			},
+		},
+	];
+	assert.equal(findLastAssistantMessage(entries as any), "Subagent error: overloaded");
+});
+
+test("findLastAssistantMessage — null when no assistant messages", () => {
+	assert.equal(findLastAssistantMessage([]), null);
+});
+
+// ---------------------------------------------------------------------------
+// internal helpers (via __test__)
+
+test("labelForSurface — prefixes with agent badge", () => {
+	assert.equal(subagents.labelForSurface("Refactor", "planner"), "[planner] Refactor");
+	assert.match(subagents.labelForSurface("Refactor"), /^🤖 Refactor$/);
+});
+
+test("buildPiPromptArgs — prepends empty separator when artifact handoff + skills", () => {
+	const args = subagents.buildPiPromptArgs({
+		effectiveSkills: "commit, release",
+		taskDelivery: "artifact",
+		taskArg: "@/tmp/task.md",
+	});
+	assert.deepEqual(args, ["", "/skill:commit", "/skill:release", "@/tmp/task.md"]);
+});
+
+test("buildPiPromptArgs — direct delivery doesn't prepend separator", () => {
+	const args = subagents.buildPiPromptArgs({
+		effectiveSkills: "commit",
+		taskDelivery: "direct",
+		taskArg: "do the thing",
+	});
+	assert.deepEqual(args, ["/skill:commit", "do the thing"]);
+});
+
+test("buildSubagentToolAllowlist — always preserves subagent_done + caller_ping", () => {
+	const allow = subagents.buildSubagentToolAllowlist("read, bash");
+	assert.match(allow!, /read/);
+	assert.match(allow!, /bash/);
+	assert.match(allow!, /subagent_done/);
+	assert.match(allow!, /caller_ping/);
+});
+
+test("buildSubagentToolAllowlist — null when no tools requested", () => {
+	assert.equal(subagents.buildSubagentToolAllowlist(undefined), null);
+	assert.equal(subagents.buildSubagentToolAllowlist(""), null);
+});
+
+test("resolveInterruptTarget — error when no id/name", () => {
+	const result = subagents.resolveInterruptTarget({});
+	assert.ok("error" in result);
+});
+
+test("resolveInterruptTarget — error when id not found", () => {
+	const result = subagents.resolveInterruptTarget({ id: "nope" });
+	assert.ok("error" in result);
+});
