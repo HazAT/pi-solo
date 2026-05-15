@@ -115,6 +115,43 @@ export function createSerialQueue(): <T>(fn: () => Promise<T>) => Promise<T> {
 	};
 }
 
+/**
+ * Apply pi-solo's per-tool argument defaults before forwarding to Solo.
+ *
+ * Solo's `scratchpad_read` silently downgrades to a headings-only outline
+ * for “large” scratchpads when `mode` is omitted — the contract claims a
+ * hint is included but the response payload does not actually carry one,
+ * which has wasted real planner sessions chasing “my write didn't save”.
+ * For pi's direct exposure we default `mode` to `"full"` so the obvious
+ * read returns the full body. Callers that want the outline or a slice
+ * can still pass `mode` (`headings`, `section`, `content`) or
+ * `offset`/`limit` explicitly.
+ */
+export function applyDirectToolDefaults(name: string, args: unknown): unknown {
+	if (name !== "scratchpad_read") return args;
+	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+	if (record.mode != null && record.mode !== "") return args;
+	return { ...record, mode: "full" };
+}
+
+/**
+ * Per-tool description overrides for the direct ("core") tool surface.
+ * Returns the override when present, otherwise `undefined` so the caller
+ * can fall back to Solo's catalog description.
+ */
+export function getDirectToolDescriptionOverride(name: string): string | undefined {
+	if (name === "scratchpad_read") {
+		return (
+			"Read one scratchpad's content, revision, and metadata. Returns the " +
+			"FULL body by default — pi-solo overrides Solo's default to avoid " +
+			"silent headings-only auto-degradation on large scratchpads. Pass " +
+			'`mode="headings"` for a compact outline, `mode="section"` + ' +
+			"`section_heading` for one section, or `offset`/`limit` for a line slice."
+		);
+	}
+	return undefined;
+}
+
 // Braille spinner shown in the status line while the Solo helper is warming
 // up. 80ms feels lively without distracting — matches typical CLI spinners.
 const SPINNER_FRAMES = [
@@ -958,7 +995,11 @@ export default function soloExtension(pi: ExtensionAPI) {
 			registered.add(piName);
 
 			const parameters = normalizeInputSchema(tool.inputSchema);
-			const description = (tool.description ?? `Solo MCP tool: ${tool.name}`).trim();
+			const description = (
+				getDirectToolDescriptionOverride(tool.name) ??
+				tool.description ??
+				`Solo MCP tool: ${tool.name}`
+			).trim();
 
 			const renderers = makeRenderers(tool.name);
 			pi.registerTool({
@@ -985,7 +1026,8 @@ export default function soloExtension(pi: ExtensionAPI) {
 						};
 					}
 					try {
-						const result = await client.callTool(tool.name, args ?? {});
+						const callArgs = applyDirectToolDefaults(tool.name, args ?? {});
+						const result = await client.callTool(tool.name, callArgs);
 						const details: any = {
 							mcpTool: tool.name,
 							structuredContent: result.structuredContent,
@@ -1002,7 +1044,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 									: typeof data?.id === "number"
 										? data.id
 										: undefined;
-							const projectId = data?.project_id ?? (args as any)?.project_id ?? undefined;
+							const projectId = data?.project_id ?? (callArgs as any)?.project_id ?? undefined;
 							if (processId != null) {
 								details.jumpHint = await computeJumpHint(
 									client,

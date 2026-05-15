@@ -27,7 +27,12 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import { extractStructured, extractTextJson, SoloMcpClient } from "../pi-extension/solo/index.ts";
+import {
+	applyDirectToolDefaults,
+	extractStructured,
+	extractTextJson,
+	SoloMcpClient,
+} from "../pi-extension/solo/index.ts";
 
 const HELPER_PATH = process.env.SOLO_MCP_HELPER ?? "/Applications/Solo.app/Contents/MacOS/mcp";
 const HELPER_AVAILABLE = existsSync(HELPER_PATH);
@@ -292,6 +297,114 @@ test(
 			assert.ok(!r.isError, `burst call #${i} errored: ${JSON.stringify(r).slice(0, 200)}`);
 		}
 		assert.equal(client.state, "ready", "helper should still be ready after burst");
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Regression for the scratchpad_read silent auto-degradation bug.
+//
+// Solo's helper silently downgrades a default `scratchpad_read` of a large
+// scratchpad to a headings-only outline and does NOT include the hint its
+// docs promise. pi-solo's direct tool defaults `mode="full"` so the obvious
+// read returns the body. This test pins both behaviors:
+//   1. The raw Solo call (no defaults) degrades — confirms the bug still
+//      exists upstream so this regression test would catch it if Solo's
+//      contract changed.
+//   2. The pi-solo wrapper (applyDirectToolDefaults → callTool) returns the
+//      full body — confirms our fix works end-to-end.
+
+function onlyHeadings(markdown: string): boolean {
+	const lines = markdown
+		.split("\n")
+		.map((l) => l.trim())
+		.filter(Boolean);
+	if (!lines.length) return false;
+	return lines.every((l) => l.startsWith("#"));
+}
+
+test(
+	"integration: regression — scratchpad_read default returns full body, not headings",
+	{ skip: SKIP_REASON },
+	async (t) => {
+		const client = makeClient();
+		t.after(async () => {
+			await deleteAllTaggedScratchpads(client, RUN_TAG);
+			client.stop();
+		});
+		await client.start();
+
+		// Build a scratchpad large enough to trip Solo's auto-degradation
+		// threshold (~25 KB observed in real planner sessions). Use clearly
+		// distinguishable headings + body so we can tell outline from full body.
+		const sectionBody = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(40);
+		const sections = Array.from({ length: 12 }, (_, i) => i + 1);
+		const marker = `MARKER-${RUN_TAG}`;
+		const content = [
+			`# Large scratchpad ${RUN_TAG}`,
+			"",
+			`Body marker: ${marker}`,
+			"",
+			...sections.flatMap((i) => [
+				`## Section ${i}`,
+				"",
+				`Body of section ${i} — ${marker}`,
+				"",
+				sectionBody,
+				"",
+			]),
+		].join("\n");
+		assert.ok(content.length > 25_000, "test fixture should exceed degrade threshold");
+
+		const name = `pi-solo-it-large-${RUN_TAG}`;
+		const created = payload<{ project_id: number; scratchpad_id: number; revision: number }>(
+			await client.callTool("scratchpad_write", { name, content, tags: [RUN_TAG] }),
+		);
+		assert.ok(created.scratchpad_id);
+
+		// Control: raw read with no mode reproduces Solo's degraded outline.
+		const rawResult = await client.callTool("scratchpad_read", {
+			scratchpad_id: created.scratchpad_id,
+		});
+		const raw = payload<{ scratchpad: { content: string } }>(rawResult);
+		assert.ok(
+			onlyHeadings(raw.scratchpad.content),
+			"control: raw scratchpad_read should degrade to headings-only on a large pad",
+		);
+		assert.ok(
+			!raw.scratchpad.content.includes(marker),
+			"control: degraded outline should not include the body marker",
+		);
+
+		// pi-solo wrapper: applyDirectToolDefaults injects mode="full".
+		const wrappedArgs = applyDirectToolDefaults("scratchpad_read", {
+			scratchpad_id: created.scratchpad_id,
+		}) as Record<string, unknown>;
+		assert.equal(wrappedArgs.mode, "full", "wrapper should inject mode=full");
+
+		const wrappedResult = await client.callTool("scratchpad_read", wrappedArgs);
+		const wrapped = payload<{ scratchpad: { content: string } }>(wrappedResult);
+		assert.ok(
+			wrapped.scratchpad.content.includes(marker),
+			"pi-solo wrapper: full read should include the body marker",
+		);
+		assert.ok(
+			!onlyHeadings(wrapped.scratchpad.content),
+			"pi-solo wrapper: full read should include body lines, not just headings",
+		);
+
+		// Explicit mode="headings" still works through the wrapper — callers
+		// who actually want the outline are not blocked by our default.
+		const headingsArgs = applyDirectToolDefaults("scratchpad_read", {
+			scratchpad_id: created.scratchpad_id,
+			mode: "headings",
+		}) as Record<string, unknown>;
+		assert.equal(headingsArgs.mode, "headings", "wrapper should respect explicit mode");
+		const headingsResult = await client.callTool("scratchpad_read", headingsArgs);
+		const headings = payload<{ scratchpad: { content: string } }>(headingsResult);
+		assert.ok(
+			onlyHeadings(headings.scratchpad.content),
+			"explicit mode=headings should still return outline-only",
+		);
 	},
 );
 

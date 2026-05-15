@@ -12,10 +12,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+	applyDirectToolDefaults,
 	createSerialQueue,
 	extractStructured,
 	extractTextJson,
 	firstLine,
+	getDirectToolDescriptionOverride,
 	getMcpToolExposure,
 	getSoloToolCategory,
 	humanizeToolLabel,
@@ -1041,4 +1043,69 @@ test("createSerialQueue — preserves submission order under microtask flooding"
 		order,
 		Array.from({ length: 25 }, (_, i) => i),
 	);
+});
+
+// ---------------------------------------------------------------------------
+// applyDirectToolDefaults / getDirectToolDescriptionOverride
+//
+// Regression coverage for Solo's silent headings-only auto-degradation on
+// `scratchpad_read`. The direct tool defaults `mode="full"` so the obvious
+// read returns body content instead of just an outline.
+
+test("applyDirectToolDefaults — scratchpad_read gets mode=full when omitted", () => {
+	const out = applyDirectToolDefaults("scratchpad_read", { scratchpad_id: 1 }) as Record<
+		string,
+		unknown
+	>;
+	assert.equal(out.mode, "full");
+	assert.equal(out.scratchpad_id, 1);
+});
+
+test("applyDirectToolDefaults — honors an explicit mode (headings)", () => {
+	const out = applyDirectToolDefaults("scratchpad_read", {
+		scratchpad_id: 1,
+		mode: "headings",
+	}) as Record<string, unknown>;
+	assert.equal(out.mode, "headings");
+});
+
+test("applyDirectToolDefaults — honors an explicit mode (section)", () => {
+	const out = applyDirectToolDefaults("scratchpad_read", {
+		scratchpad_id: 1,
+		mode: "section",
+		section_heading: "Intent",
+	}) as Record<string, unknown>;
+	assert.equal(out.mode, "section");
+	assert.equal(out.section_heading, "Intent");
+});
+
+test("applyDirectToolDefaults — injects mode when mode is an empty string", () => {
+	const out = applyDirectToolDefaults("scratchpad_read", {
+		scratchpad_id: 1,
+		mode: "",
+	}) as Record<string, unknown>;
+	assert.equal(out.mode, "full");
+});
+
+test("applyDirectToolDefaults — leaves unrelated tools untouched", () => {
+	const args = { title: "hi", tags: ["x"] };
+	assert.strictEqual(applyDirectToolDefaults("todo_create", args), args);
+	assert.strictEqual(applyDirectToolDefaults("scratchpad_write", args), args);
+});
+
+test("applyDirectToolDefaults — handles non-object args defensively", () => {
+	const out = applyDirectToolDefaults("scratchpad_read", null) as Record<string, unknown>;
+	assert.equal(out.mode, "full");
+});
+
+test("getDirectToolDescriptionOverride — explains the scratchpad_read default", () => {
+	const desc = getDirectToolDescriptionOverride("scratchpad_read");
+	assert.ok(desc, "expected a description override for scratchpad_read");
+	assert.match(desc!, /full body/i);
+	assert.match(desc!, /headings/i);
+});
+
+test("getDirectToolDescriptionOverride — no override for tools we leave alone", () => {
+	assert.equal(getDirectToolDescriptionOverride("todo_create"), undefined);
+	assert.equal(getDirectToolDescriptionOverride("scratchpad_write"), undefined);
 });
