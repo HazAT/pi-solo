@@ -12,6 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+	createSerialQueue,
 	extractStructured,
 	extractTextJson,
 	firstLine,
@@ -976,4 +977,68 @@ test("applySubagentModelOverride — reports missing API key without applying mo
 	} finally {
 		h.restoreEnv();
 	}
+});
+
+// ---------------------------------------------------------------------------
+// createSerialQueue — regression test for the Solo helper crash on
+// back-to-back parallel `tools/call` requests (e.g. two todo_create in
+// flight at once). Tool calls must run one-at-a-time.
+
+test("createSerialQueue — runs queued work sequentially, never overlapping", async () => {
+	const enqueue = createSerialQueue();
+	let inFlight = 0;
+	let maxInFlight = 0;
+	const order: number[] = [];
+
+	const make = (id: number, delay: number) =>
+		enqueue(async () => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise((r) => setTimeout(r, delay));
+			order.push(id);
+			inFlight--;
+			return id;
+		});
+
+	const results = await Promise.all([make(1, 30), make(2, 5), make(3, 15)]);
+
+	assert.equal(maxInFlight, 1, "queue must keep at most one call in flight");
+	assert.deepEqual(order, [1, 2, 3], "queued work must run in submission order");
+	assert.deepEqual(results, [1, 2, 3]);
+});
+
+test("createSerialQueue — a rejected call does not block subsequent calls", async () => {
+	const enqueue = createSerialQueue();
+	const order: string[] = [];
+
+	const a = enqueue(async () => {
+		order.push("a-start");
+		throw new Error("boom");
+	});
+	const b = enqueue(async () => {
+		order.push("b");
+		return "b-ok";
+	});
+
+	await assert.rejects(a, /boom/);
+	assert.equal(await b, "b-ok");
+	assert.deepEqual(order, ["a-start", "b"]);
+});
+
+test("createSerialQueue — preserves submission order under microtask flooding", async () => {
+	const enqueue = createSerialQueue();
+	const order: number[] = [];
+	const pending: Promise<unknown>[] = [];
+	for (let i = 0; i < 25; i++) {
+		pending.push(
+			enqueue(async () => {
+				order.push(i);
+			}),
+		);
+	}
+	await Promise.all(pending);
+	assert.deepEqual(
+		order,
+		Array.from({ length: 25 }, (_, i) => i),
+	);
 });

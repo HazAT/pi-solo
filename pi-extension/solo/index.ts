@@ -93,6 +93,28 @@ export function getSoloToolCategory(name: string): string {
 // helper; quiet periods cost zero subprocesses.
 const HELPER_IDLE_CLOSE_MS = 5_000;
 
+/**
+ * Create a function that serializes async work onto a single promise chain.
+ * Each call to the returned function waits for any previously-queued work to
+ * settle (resolved or rejected) before its own `fn` runs. Errors from one
+ * call do not poison subsequent calls.
+ *
+ * Used to keep one Solo MCP `tools/call` in flight at a time — the helper
+ * has crashed (exit 1) when two large requests landed in parallel, e.g. two
+ * back-to-back `todo_create` calls.
+ */
+export function createSerialQueue(): <T>(fn: () => Promise<T>) => Promise<T> {
+	let tail: Promise<unknown> = Promise.resolve();
+	return <T>(fn: () => Promise<T>): Promise<T> => {
+		const run = tail.then(fn, fn);
+		tail = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	};
+}
+
 // Braille spinner shown in the status line while the Solo helper is warming
 // up. 80ms feels lively without distracting — matches typical CLI spinners.
 const SPINNER_FRAMES = [
@@ -176,7 +198,7 @@ interface WhoamiResult {
 // -------------------------------------------------------------------------
 // MCP client over the bundled stdio helper
 
-class SoloMcpClient {
+export class SoloMcpClient {
 	private child?: ChildProcessByStdio<Writable, Readable, Readable>;
 	private buf = "";
 	private nextId = 1;
@@ -187,6 +209,12 @@ class SoloMcpClient {
 	private stopped = false;
 	private idleTimer?: NodeJS.Timeout;
 	private ensurePromise?: Promise<void>;
+	// Serializes outbound `tools/call` requests. The Solo helper has proved
+	// unreliable when two large requests land back-to-back — e.g. two parallel
+	// todo_create calls have crashed the helper (exit 1) in the wild. We keep
+	// one call in flight at a time; the overhead is a single extra round-trip
+	// per call, which is invisible against the existing IPC latency.
+	private readonly enqueueCall = createSerialQueue();
 
 	state: "stopped" | "warming" | "ready" | "failed" = "stopped";
 	tools: McpToolDef[] = [];
@@ -483,12 +511,14 @@ class SoloMcpClient {
 	}
 
 	async callTool(name: string, args: unknown): Promise<McpToolCallResult> {
-		await this.ensureChild();
-		try {
-			return await this.request<McpToolCallResult>("tools/call", { name, arguments: args });
-		} finally {
-			this.touchIdle();
-		}
+		return this.enqueueCall(async () => {
+			await this.ensureChild();
+			try {
+				return await this.request<McpToolCallResult>("tools/call", { name, arguments: args });
+			} finally {
+				this.touchIdle();
+			}
+		});
 	}
 
 	isReady(): boolean {

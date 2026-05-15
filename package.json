@@ -18,7 +18,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test test/test.ts"
+    "test": "node --test test/test.ts test/integration.test.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.74.0",
