@@ -404,7 +404,6 @@ interface BuildTaskParams {
 	task: string;
 	artifactScratchpadName?: string;
 	artifactScratchpadId?: number;
-	artifactScratchpadRevision?: number;
 	interactive?: boolean;
 }
 
@@ -427,16 +426,14 @@ export function buildWrappedTask(params: BuildTaskParams): string {
 	if (params.artifactScratchpadName) {
 		const idText =
 			params.artifactScratchpadId != null ? ` (id ${params.artifactScratchpadId})` : "";
-		const revisionText =
-			params.artifactScratchpadId != null && params.artifactScratchpadRevision != null
-				? ` Use scratchpad_id: ${params.artifactScratchpadId} and expected_revision: ${params.artifactScratchpadRevision} when you overwrite the placeholder.`
-				: params.artifactScratchpadId != null
-					? ` Read scratchpad_id: ${params.artifactScratchpadId} first if you need its latest revision, then overwrite the placeholder.`
-					: " If it does not exist yet, create it with scratchpad_write using that name.";
+		const writeHint =
+			params.artifactScratchpadId != null
+				? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId} and your content — you do not need expected_revision. If the tool ever returns a revision-mismatch error, retry once using the \`current\` value from the error message; do not call scratchpad_read first.`
+				: " Call scratchpad_write with that name and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the `current` value from the error message.";
 		sections.push(
 			[
 				"### Artifact (Solo scratchpad)",
-				`Save any artifact you produce (plan, spec, context document, report, result note, etc.) to the Solo scratchpad named "${params.artifactScratchpadName}"${idText} via scratchpad_write.${revisionText}`,
+				`Save any artifact you produce (plan, spec, context document, report, result note, etc.) to the Solo scratchpad named "${params.artifactScratchpadName}"${idText}.${writeHint}`,
 				"Reference the scratchpad name and id in your final summary so the parent can pick up the result.",
 			].join("\n\n"),
 		);
@@ -672,7 +669,6 @@ async function launchSubagent(
 		task: params.task,
 		artifactScratchpadName: artifact?.name,
 		artifactScratchpadId: artifact?.scratchpadId,
-		artifactScratchpadRevision: artifact?.revision,
 		interactive,
 	});
 
