@@ -8,7 +8,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1005,31 +1005,34 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 	pi.registerMessageRenderer("subagent_result", (message, _options, theme) => {
 		const details = message.details as any;
 		if (!details) return undefined;
-		return {
-			render(): string[] {
-				const name = details.name ?? "subagent";
-				const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
-				const statusLabel = details.kind === "interactive-ready" ? "ready" : "done";
-				const processId = details.processId;
-				const soloRef = processId != null ? ` (Solo #${processId})` : "";
-				const artifactTag =
-					details.scratchpadName != null
-						? theme.fg("dim", ` · artifact → ${details.scratchpadName}`)
-						: details.scratchpadId != null
-							? theme.fg("dim", ` · artifact → #${details.scratchpadId}`)
-							: "";
 
-				return [
-					"",
-					theme.fg("accent", "▸") +
-						" " +
-						theme.fg("toolTitle", theme.bold(name)) +
-						agentTag +
-						theme.fg("dim", ` — ${statusLabel}${soloRef}`) +
-						artifactTag,
-				];
-			},
-		};
+		const name = details.name ?? "subagent";
+		const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
+		const statusLabel = details.kind === "interactive-ready" ? "ready" : "done";
+		const processId = details.processId;
+		const soloRef = processId != null ? ` (Solo #${processId})` : "";
+		const artifactTag =
+			details.scratchpadName != null
+				? theme.fg("dim", ` · artifact → ${details.scratchpadName}`)
+				: details.scratchpadId != null
+					? theme.fg("dim", ` · artifact → #${details.scratchpadId}`)
+					: "";
+
+		const headerLine =
+			theme.fg("accent", "▸") +
+			" " +
+			theme.fg("toolTitle", theme.bold(name)) +
+			agentTag +
+			theme.fg("dim", ` — ${statusLabel}${soloRef}`) +
+			artifactTag;
+
+		// Match the visual frame of a successful tool call (toolSuccessBg) so
+		// the wake-up reads as part of the subagent's tool stream rather than a
+		// generic custom message in `customMessageBg`.
+		const bgFn = (t: string) => theme.bg("toolSuccessBg", t);
+		const box = new Box(1, 1, bgFn);
+		box.addChild(new Text(headerLine, 0, 0, bgFn));
+		return box;
 	});
 }
 
