@@ -67,7 +67,7 @@ Solo subagents lean into Solo's own primitives. Subagents run as real Solo agent
 
 ### Agent definitions
 
-Drop a `.md` file in `~/.pi/agent/agents/<name>.md` (or `.pi/agents/<name>.md` for project-local overrides). v2 uses the frontmatter for `name`, `description`, `interactive`, and `output`, and inlines the markdown body into the first prompt as the agent's identity. Per-spawn `model`, `tools`, `skills`, `cwd`, and session-mode fields are tolerated for existing files but are not honored because Solo runs the configured agent tool command (`pi`) directly.
+Drop a `.md` file in `~/.pi/agent/agents/<name>.md` (or `.pi/agents/<name>.md` for project-local overrides). v2 uses the frontmatter for `name`, `description`, `interactive`, `output`, `model`, and `thinking`, and inlines the markdown body into the first prompt as the agent's identity. `model` (and the optional `:<thinking>` suffix or standalone `thinking:` field) are applied in the child via `pi.setModel` / `pi.setThinkingLevel` at session start — the parent sets the surface name to `[<agent>] <display>` so the child can find its definition. Per-spawn `tools`, `skills`, `cwd`, and session-mode fields are tolerated for existing files but are not honored because Solo runs the configured agent tool command (`pi`) directly.
 
 ```markdown
 ---

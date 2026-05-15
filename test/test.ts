@@ -328,12 +328,16 @@ test("smoke — extension module exports default function", async () => {
 
 import {
 	__test__ as subagents,
+	applySubagentModelOverride,
 	buildArtifactScratchpadName,
 	buildWakeBody,
 	buildWrappedTask,
 	parseAgentDefinition,
 	resolveEffectiveInteractive,
 } from "../pi-extension/solo/subagents/index.ts";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import {
 	resetResolvedPiAgentToolIdForTests,
 	resolvePiAgentToolId,
@@ -666,4 +670,263 @@ test("resolveInterruptTarget — error when no id/name", () => {
 test("resolveInterruptTarget — error when id not found", () => {
 	const result = subagents.resolveInterruptTarget({ id: "nope" });
 	assert.ok("error" in result);
+});
+
+// ---------------------------------------------------------------------------
+// subagent model override (child side)
+
+test("parseAgentTagFromProcessName — extracts agent from `[<agent>] ...`", () => {
+	assert.equal(subagents.parseAgentTagFromProcessName("[scout] Scout: capture"), "scout");
+	assert.equal(subagents.parseAgentTagFromProcessName("[worker] Implement todo"), "worker");
+});
+
+test("parseAgentTagFromProcessName — returns null for unrelated names", () => {
+	assert.equal(subagents.parseAgentTagFromProcessName(undefined), null);
+	assert.equal(subagents.parseAgentTagFromProcessName(""), null);
+	assert.equal(subagents.parseAgentTagFromProcessName("\ud83e\udd16 Adhoc subagent"), null);
+	assert.equal(subagents.parseAgentTagFromProcessName("Plain process name"), null);
+});
+
+test("parseModelSpec — splits provider/model and tolerates whitespace", () => {
+	assert.deepEqual(subagents.parseModelSpec("anthropic/claude-haiku-4-5"), {
+		provider: "anthropic",
+		modelId: "claude-haiku-4-5",
+		thinking: undefined,
+	});
+	assert.deepEqual(subagents.parseModelSpec("  openai/gpt-5  "), {
+		provider: "openai",
+		modelId: "gpt-5",
+		thinking: undefined,
+	});
+});
+
+test("parseModelSpec — honors `:thinking` suffix when valid", () => {
+	assert.deepEqual(subagents.parseModelSpec("anthropic/claude-opus-4-7:high"), {
+		provider: "anthropic",
+		modelId: "claude-opus-4-7",
+		thinking: "high",
+	});
+});
+
+test("parseModelSpec — drops invalid `:thinking` suffix", () => {
+	const parsed = subagents.parseModelSpec("anthropic/claude-opus-4-7:bogus");
+	assert.equal(parsed?.thinking, undefined);
+	assert.equal(parsed?.modelId, "claude-opus-4-7");
+});
+
+test("parseModelSpec — returns null for malformed input", () => {
+	assert.equal(subagents.parseModelSpec(undefined), null);
+	assert.equal(subagents.parseModelSpec(""), null);
+	assert.equal(subagents.parseModelSpec("no-slash"), null);
+	assert.equal(subagents.parseModelSpec("/leading-slash"), null);
+	assert.equal(subagents.parseModelSpec("trailing-slash/"), null);
+});
+
+test("normalizeThinkingLevel — accepts known levels case-insensitively", () => {
+	assert.equal(subagents.normalizeThinkingLevel("low"), "low");
+	assert.equal(subagents.normalizeThinkingLevel("  XHIGH "), "xhigh");
+	assert.equal(subagents.normalizeThinkingLevel("off"), "off");
+});
+
+test("normalizeThinkingLevel — rejects unknown values", () => {
+	assert.equal(subagents.normalizeThinkingLevel(undefined), null);
+	assert.equal(subagents.normalizeThinkingLevel(""), null);
+	assert.equal(subagents.normalizeThinkingLevel("extreme"), null);
+});
+
+// applySubagentModelOverride: end-to-end with a faked filesystem + pi runtime
+
+interface OverrideHarness {
+	dir: string;
+	restoreEnv: () => void;
+	writeAgent: (name: string, frontmatter: Record<string, string>, body?: string) => void;
+	makePi: () => {
+		pi: any;
+		calls: { setModel: any[]; setThinkingLevel: any[] };
+	};
+	makeCtx: (modelFinder: (provider: string, id: string) => any) => any;
+	makeClient: (processStatus: { name?: string } | Error) => any;
+}
+
+function setupOverrideHarness(): OverrideHarness {
+	const dir = mkdtempSync(joinPath(tmpdir(), "pi-solo-override-"));
+	mkdirSync(joinPath(dir, "agents"), { recursive: true });
+
+	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const priorSoloId = process.env.SOLO_PROCESS_ID;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	process.env.SOLO_PROCESS_ID = "42";
+
+	return {
+		dir,
+		restoreEnv() {
+			if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+			if (priorSoloId === undefined) delete process.env.SOLO_PROCESS_ID;
+			else process.env.SOLO_PROCESS_ID = priorSoloId;
+			rmSync(dir, { recursive: true, force: true });
+		},
+		writeAgent(name, frontmatter, body = "# Body\n") {
+			const yaml = Object.entries(frontmatter)
+				.map(([k, v]) => `${k}: ${v}`)
+				.join("\n");
+			writeFileSync(joinPath(dir, "agents", `${name}.md`), `---\n${yaml}\n---\n${body}`);
+		},
+		makePi() {
+			const calls = { setModel: [] as any[], setThinkingLevel: [] as any[] };
+			const pi = {
+				async setModel(model: any) {
+					calls.setModel.push(model);
+					return true;
+				},
+				setThinkingLevel(level: any) {
+					calls.setThinkingLevel.push(level);
+				},
+			};
+			return { pi, calls };
+		},
+		makeCtx(modelFinder) {
+			return {
+				hasUI: false,
+				ui: { notify: () => {} },
+				modelRegistry: { find: modelFinder },
+			};
+		},
+		makeClient(processStatus) {
+			return {
+				async callTool(name: string, args: unknown) {
+					if (name !== "get_process_status") {
+						throw new Error(`unexpected call: ${name}`);
+					}
+					assert.deepEqual(args, { process_id: 42 });
+					if (processStatus instanceof Error) throw processStatus;
+					return { structuredContent: processStatus };
+				},
+			};
+		},
+	};
+}
+
+test("applySubagentModelOverride — applies model and thinking from agent .md", async () => {
+	const h = setupOverrideHarness();
+	try {
+		h.writeAgent("scout", { model: "anthropic/claude-haiku-4-5", thinking: "medium" });
+		const { pi, calls } = h.makePi();
+		const fakeModel = { id: "claude-haiku-4-5", provider: "anthropic" };
+		const ctx = h.makeCtx((provider, id) => {
+			assert.equal(provider, "anthropic");
+			assert.equal(id, "claude-haiku-4-5");
+			return fakeModel;
+		});
+		const client = h.makeClient({ name: "[scout] Scout: capture" });
+
+		const result = await applySubagentModelOverride(pi, ctx, client);
+
+		assert.equal(result.applied, true);
+		assert.equal(result.agent, "scout");
+		assert.equal(result.model, "anthropic/claude-haiku-4-5");
+		assert.equal(result.thinking, "medium");
+		assert.deepEqual(calls.setModel, [fakeModel]);
+		assert.deepEqual(calls.setThinkingLevel, ["medium"]);
+	} finally {
+		h.restoreEnv();
+	}
+});
+
+test("applySubagentModelOverride — honors :thinking suffix on model spec", async () => {
+	const h = setupOverrideHarness();
+	try {
+		h.writeAgent("reviewer", { model: "anthropic/claude-opus-4-7:high" });
+		const { pi, calls } = h.makePi();
+		const fakeModel = { id: "claude-opus-4-7", provider: "anthropic" };
+		const ctx = h.makeCtx(() => fakeModel);
+		const client = h.makeClient({ name: "[reviewer] Reviewer: pr" });
+
+		const result = await applySubagentModelOverride(pi, ctx, client);
+
+		assert.equal(result.applied, true);
+		assert.equal(result.thinking, "high");
+		assert.deepEqual(calls.setThinkingLevel, ["high"]);
+	} finally {
+		h.restoreEnv();
+	}
+});
+
+test("applySubagentModelOverride — skips when no SOLO_PROCESS_ID", async () => {
+	const priorSoloId = process.env.SOLO_PROCESS_ID;
+	delete process.env.SOLO_PROCESS_ID;
+	try {
+		const result = await applySubagentModelOverride({} as any, {} as any, {
+			async callTool() {
+				throw new Error("should not call MCP");
+			},
+		});
+		assert.equal(result.applied, false);
+		assert.match(result.reason ?? "", /SOLO_PROCESS_ID/);
+	} finally {
+		if (priorSoloId !== undefined) process.env.SOLO_PROCESS_ID = priorSoloId;
+	}
+});
+
+test("applySubagentModelOverride — skips when process name has no [<agent>] tag", async () => {
+	const h = setupOverrideHarness();
+	try {
+		const { pi, calls } = h.makePi();
+		const ctx = h.makeCtx(() => ({}));
+		const client = h.makeClient({ name: "\ud83e\udd16 Plain pi session" });
+
+		const result = await applySubagentModelOverride(pi, ctx, client);
+
+		assert.equal(result.applied, false);
+		assert.match(result.reason ?? "", /no \[<agent>\] tag/);
+		assert.equal(calls.setModel.length, 0);
+		assert.equal(calls.setThinkingLevel.length, 0);
+	} finally {
+		h.restoreEnv();
+	}
+});
+
+test("applySubagentModelOverride — skips when model not in registry", async () => {
+	const h = setupOverrideHarness();
+	try {
+		h.writeAgent("scout", { model: "anthropic/ghost-model" });
+		const { pi, calls } = h.makePi();
+		const ctx = h.makeCtx(() => undefined);
+		const client = h.makeClient({ name: "[scout] Scout: x" });
+
+		const result = await applySubagentModelOverride(pi, ctx, client);
+
+		assert.equal(result.applied, false);
+		assert.equal(calls.setModel.length, 0);
+	} finally {
+		h.restoreEnv();
+	}
+});
+
+test("applySubagentModelOverride — reports missing API key without applying model", async () => {
+	const h = setupOverrideHarness();
+	try {
+		h.writeAgent("scout", { model: "anthropic/claude-haiku-4-5" });
+		const fakeModel = { id: "claude-haiku-4-5", provider: "anthropic" };
+		const calls = { setModel: [] as any[], setThinkingLevel: [] as any[] };
+		const pi: any = {
+			async setModel(model: any) {
+				calls.setModel.push(model);
+				return false; // simulates no API key
+			},
+			setThinkingLevel(level: any) {
+				calls.setThinkingLevel.push(level);
+			},
+		};
+		const ctx = h.makeCtx(() => fakeModel);
+		const client = h.makeClient({ name: "[scout] Scout: x" });
+
+		const result = await applySubagentModelOverride(pi, ctx, client);
+
+		assert.equal(result.applied, false);
+		assert.equal(result.model, undefined);
+		assert.deepEqual(calls.setModel, [fakeModel]);
+	} finally {
+		h.restoreEnv();
+	}
 });
