@@ -500,10 +500,72 @@ export function buildWakeBody(params: BuildWakeBodyParams): string {
 	].join("\n\n");
 }
 
-function parseWakeMarker(text: string): { processId: number } | null {
-	const match = text.match(/^\[pi-solo:subagent-(?:done|interactive-ready) id=(\d+)/);
+export interface ParsedWakeMarker {
+	kind: "done" | "interactive-ready";
+	processId: number;
+	scratchpadId?: number;
+	name?: string;
+	agent?: string;
+}
+
+export function parseWakeMarker(text: string): ParsedWakeMarker | null {
+	// Solo's idle timer prepends `[Solo timer #N] [wait for any: ...]` before
+	// our wake body, so the marker is rarely at the very start of the input.
+	// Match anywhere; the marker token is unambiguous enough on its own.
+	const match = text.match(/\[pi-solo:subagent-(done|interactive-ready)\s+id=(\d+)([^\]]*)\]/);
 	if (!match) return null;
-	return { processId: Number(match[1]) };
+
+	const kind = match[1] as "done" | "interactive-ready";
+	const processId = Number(match[2]);
+	const tail = match[3] ?? "";
+
+	const scratchpadMatch = tail.match(/\bscratchpad=(\d+)/);
+	const nameMatch = tail.match(/\bname="((?:\\.|[^"\\])*)"/);
+	const agentMatch = tail.match(/\bagent="((?:\\.|[^"\\])*)"/);
+
+	const unquote = (s: string) => s.replace(/\\(.)/g, "$1");
+
+	return {
+		kind,
+		processId,
+		scratchpadId: scratchpadMatch ? Number(scratchpadMatch[1]) : undefined,
+		name: nameMatch ? unquote(nameMatch[1]!) : undefined,
+		agent: agentMatch ? unquote(agentMatch[1]!) : undefined,
+	};
+}
+
+/**
+ * Compact wake-up body fed to the LLM after we suppress the verbose Solo
+ * timer prompt. The model already has solo_tool / scratchpad_read in its
+ * tool catalog; it does not need paragraph-length instructions to know how
+ * to call them.
+ */
+export function buildShortWakeBody(params: {
+	kind: "done" | "interactive-ready";
+	processId: number;
+	name: string;
+	agent?: string;
+	scratchpadId?: number;
+	scratchpadName?: string;
+}): string {
+	const scratchpadRef =
+		params.scratchpadId != null
+			? `Artifact: scratchpad #${params.scratchpadId}${params.scratchpadName ? ` ("${params.scratchpadName}")` : ""} — read with scratchpad_read.`
+			: "No artifact scratchpad was pre-created for this subagent.";
+
+	if (params.kind === "interactive-ready") {
+		return [
+			`Sub-agent "${params.name}" (Solo agent #${params.processId}) finished its turn and is waiting in its Solo pane.`,
+			scratchpadRef,
+			"Do not close the pane automatically — the user can continue the conversation in Solo.",
+		].join(" ");
+	}
+
+	return [
+		`Sub-agent "${params.name}" (Solo agent #${params.processId}) reached idle.`,
+		scratchpadRef,
+		`When done, close the pane with close_process(${params.processId}).`,
+	].join(" ");
 }
 
 // ── Tool parameters ─────────────────────────────────────────────────────
@@ -688,13 +750,60 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		runningSubagents.clear();
 	});
 
-	pi.on("input", (event: any) => {
+	pi.on("input", async (event) => {
 		const marker = parseWakeMarker(event.text ?? "");
 		if (!marker) return { action: "continue" };
-		for (const [id, running] of runningSubagents) {
-			if (running.processId === marker.processId) runningSubagents.delete(id);
+
+		// Clean up internal tracking and recover the original launch params so
+		// the renderer can show the artifact path and the LLM gets a tight body.
+		let running: RunningSubagent | undefined;
+		for (const [id, r] of runningSubagents) {
+			if (r.processId === marker.processId) {
+				running = r;
+				runningSubagents.delete(id);
+				break;
+			}
 		}
-		return { action: "continue" };
+
+		const displayName = running?.name ?? marker.name ?? `Solo #${marker.processId}`;
+		const agentName = running?.agent ?? marker.agent;
+		const scratchpadId = marker.scratchpadId ?? running?.artifactScratchpadId;
+		const scratchpadName = running?.artifactScratchpadName;
+
+		const llmBody = buildShortWakeBody({
+			kind: marker.kind,
+			processId: marker.processId,
+			name: displayName,
+			agent: agentName,
+			scratchpadId,
+			scratchpadName,
+		});
+
+		// Inject as a typed custom message so the registered `subagent_result`
+		// renderer takes over the UI presentation. If sendMessage fails for any
+		// reason, fall back to letting the original input through so the wake
+		// is never silently dropped.
+		try {
+			await pi.sendMessage(
+				{
+					customType: "subagent_result",
+					content: llmBody,
+					display: true,
+					details: {
+						kind: marker.kind,
+						name: displayName,
+						agent: agentName,
+						processId: marker.processId,
+						scratchpadId,
+						scratchpadName,
+					},
+				},
+				{ triggerTurn: true },
+			);
+			return { action: "handled" };
+		} catch {
+			return { action: "continue" };
+		}
 	});
 
 	// ── subagent ──
@@ -899,14 +1008,25 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		return {
 			render(): string[] {
 				const name = details.name ?? "subagent";
-				const content = typeof message.content === "string" ? message.content : "";
+				const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
+				const statusLabel = details.kind === "interactive-ready" ? "ready" : "done";
+				const processId = details.processId;
+				const soloRef = processId != null ? ` (Solo #${processId})` : "";
+				const artifactTag =
+					details.scratchpadName != null
+						? theme.fg("dim", ` · artifact → ${details.scratchpadName}`)
+						: details.scratchpadId != null
+							? theme.fg("dim", ` · artifact → #${details.scratchpadId}`)
+							: "";
+
 				return [
 					"",
 					theme.fg("accent", "▸") +
 						" " +
 						theme.fg("toolTitle", theme.bold(name)) +
-						theme.fg("dim", ` — Solo #${details.processId ?? "?"}`),
-					...content.split("\n").map((line) => theme.fg("dim", line)),
+						agentTag +
+						theme.fg("dim", ` — ${statusLabel}${soloRef}`) +
+						artifactTag,
 				];
 			},
 		};
@@ -916,6 +1036,7 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 // Exported for tests
 export const __test__ = {
 	buildArtifactScratchpadName,
+	buildShortWakeBody,
 	buildWakeBody,
 	buildWrappedTask,
 	discoverAgentDefinitions,

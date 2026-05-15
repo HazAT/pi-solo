@@ -642,24 +642,71 @@ test("labelForSurface — prefixes with agent badge", () => {
 	assert.match(subagents.labelForSurface("Refactor"), /^🤖 Refactor$/);
 });
 
-test("parseWakeMarker — recognizes autonomous wake marker", () => {
+test("parseWakeMarker — extracts kind, processId, scratchpadId, name, agent", () => {
 	assert.deepEqual(
-		subagents.parseWakeMarker('[pi-solo:subagent-done id=44 scratchpad=9 name="x"]'),
+		subagents.parseWakeMarker(
+			'[pi-solo:subagent-done id=44 scratchpad=9 name="Scout" agent="scout"]',
+		),
 		{
+			kind: "done",
 			processId: 44,
+			scratchpadId: 9,
+			name: "Scout",
+			agent: "scout",
 		},
 	);
 });
 
 test("parseWakeMarker — recognizes interactive wake marker", () => {
 	assert.deepEqual(
-		subagents.parseWakeMarker('[pi-solo:subagent-interactive-ready id=45 name="x"]'),
-		{ processId: 45 },
+		subagents.parseWakeMarker('[pi-solo:subagent-interactive-ready id=45 name="Planner"]'),
+		{
+			kind: "interactive-ready",
+			processId: 45,
+			scratchpadId: undefined,
+			name: "Planner",
+			agent: undefined,
+		},
 	);
+});
+
+test("parseWakeMarker — tolerates Solo's `[Solo timer #N]` prefix", () => {
+	const input =
+		'[Solo timer #8] [wait for any: idle detected in [scout] Scout: x (64)] [pi-solo:subagent-done id=64 scratchpad=13 name="Scout: smoketest" agent="scout"]\n\nSub-agent ...';
+	const parsed = subagents.parseWakeMarker(input);
+	assert.equal(parsed?.processId, 64);
+	assert.equal(parsed?.scratchpadId, 13);
+	assert.equal(parsed?.name, "Scout: smoketest");
+	assert.equal(parsed?.agent, "scout");
 });
 
 test("parseWakeMarker — returns null for ordinary input", () => {
 	assert.equal(subagents.parseWakeMarker("hello"), null);
+});
+
+test("buildShortWakeBody — done variant references scratchpad and close_process", () => {
+	const body = subagents.buildShortWakeBody({
+		kind: "done",
+		processId: 64,
+		name: "Scout: x",
+		scratchpadId: 13,
+	});
+	assert.match(body, /Sub-agent "Scout: x"/);
+	assert.match(body, /Solo agent #64/);
+	assert.match(body, /scratchpad #13/);
+	assert.match(body, /close_process\(64\)/);
+});
+
+test("buildShortWakeBody — interactive variant tells parent to keep pane open", () => {
+	const body = subagents.buildShortWakeBody({
+		kind: "interactive-ready",
+		processId: 70,
+		name: "Planner: pr",
+		scratchpadId: 7,
+	});
+	assert.match(body, /waiting in its Solo pane/);
+	assert.match(body, /Do not close the pane automatically/);
+	assert.doesNotMatch(body, /close_process/);
 });
 
 test("resolveInterruptTarget — error when no id/name", () => {
