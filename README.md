@@ -4,6 +4,8 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 
 ## What it does
 
+- **PI SOLO header banner** with a live status line beneath it: connection state (starting / warming / connected / disabled / error), catalog size split into direct vs. gateway tools, the active surface profile, and the current model. Replaces pi's built-in header on `session_start` and re-renders on model changes and on every Solo MCP client transition — so the very first thing you see on startup already advertises what the extension is contributing.
+- **Bundled `solo` theme** — a GitHub-dark-derived palette shipped with the extension via `pi.themes`. Installing the package makes the theme available in `/settings`; select it with `"theme": "solo"` in your pi `settings.json`.
 - Auto-detects Solo's bundled MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`.
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
 - Queries Solo for its full tool catalog and exposes a curated tool surface. By default, only the handoff/workflow essentials (`scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, `todo_complete`) are **first-class Pi tools**; lower-frequency cleanup/admin tools stay discoverable and callable through `solo_tool`.
@@ -33,6 +35,29 @@ ln -s ~/Projects/pi-solo/pi-extension/solo ~/.pi/agent/extensions/solo
 ```
 
 The extension is auto-discovered. Run `/reload` if Pi is already running.
+
+## Theme
+
+The package ships a `solo` theme (a GitHub-dark-derived palette tuned for the banner gradient) under `themes/solo.json` and registers it via `pi.themes` in `package.json`. After installing the extension:
+
+- Pick it interactively with `/settings` → Theme → `solo`, **or**
+- Set it globally in `~/.pi/agent/settings.json`:
+
+  ```json
+  { "theme": "solo" }
+  ```
+
+The currently active custom theme hot-reloads on edit, so tweaking `themes/solo.json` in a clone gives immediate visual feedback.
+
+## Header
+
+When the extension loads it replaces pi's built-in header with a gradient `PI SOLO` block-letter banner plus a live status line:
+
+```
+● solo connected · 76 tools (7 direct · 69 gateway · core) · model claude-sonnet-4-6
+```
+
+The status dot reflects the SoloMcpClient state — green when connected, yellow while warming or when MCP is toggled off in Solo settings, red on error — and the line re-renders on every model change and every MCP client transition. The previously transient `Solo connected — …` notification is gone; the same information now lives permanently in the header.
 
 ## Setup
 
@@ -163,9 +188,12 @@ After successful `spawn_process` / `start_process` / `restart_process` / `get_pr
 pi-solo/
 ├── pi-extension/solo/
 │   ├── index.ts                 ← main extension (MCP client + tool registration)
+│   ├── header.ts                ← PI SOLO banner + live status subtitle
 │   └── subagents/
 │       ├── index.ts             ← subagent tools, commands, task/wake text
 │       └── solo-surface.ts      ← thin Solo backend (agent spawn/send/timer/close)
+├── themes/
+│   └── solo.json                ← bundled `solo` theme (GitHub-dark palette)
 ├── test/test.ts                 ← unit tests (node:test)
 ├── vite.config.ts               ← Vite+ config (fmt / lint / staged)
 ├── .editorconfig                ← shared indent / line-ending rules
