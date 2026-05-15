@@ -33,6 +33,9 @@
   "pi": {
     "extensions": [
       "./pi-extension/solo/index.ts"
+    ],
+    "themes": [
+      "./themes"
     ]
   }
 }

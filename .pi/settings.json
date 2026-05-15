@@ -6,6 +6,7 @@
       "skills": []
     }
   ],
+  "themes": ["../themes"],
   "extensions": ["../pi-extension/solo/index.ts"],
   "skills": []
 }
