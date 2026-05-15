@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
+import { installSoloHeader, setSoloHeaderStatus } from "./header.ts";
 import { applySubagentModelOverride, initSoloSubagents } from "./subagents/index.ts";
 
 // -------------------------------------------------------------------------
@@ -1129,16 +1130,25 @@ export default function soloExtension(pi: ExtensionAPI) {
 	const client = new SoloMcpClient(
 		async (c) => {
 			registerToolsFromCatalog(c);
-			if (uiCtx?.hasUI) {
-				const msg = c.isMcpDisabled()
-					? "Solo connected — but MCP is disabled in Solo settings"
-					: `Solo connected — ${formatCatalogCounts(c.tools)}`;
-				uiCtx.ui.notify(msg, c.isMcpDisabled() ? "warning" : "info");
+			if (c.isMcpDisabled()) {
+				setSoloHeaderStatus({ kind: "disabled" });
+			} else {
+				const counts = summarizeCatalogExposure(c.tools);
+				setSoloHeaderStatus({
+					kind: "connected",
+					total: c.tools.length,
+					direct: counts.direct,
+					gateway: counts.gateway,
+					profile: TOOL_SURFACE_PROFILE,
+				});
 			}
 			syncSpinner();
 			pushStatus();
 		},
 		() => {
+			if (client.state === "warming") setSoloHeaderStatus({ kind: "warming" });
+			else if (client.state === "failed")
+				setSoloHeaderStatus({ kind: "error", message: client.lastError ?? "unknown" });
 			syncSpinner();
 			pushStatus();
 		},
@@ -1159,6 +1169,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		uiCtx = ctx;
+		installSoloHeader(ctx, pi);
 		await client.start();
 
 		// If this Pi was launched as a Solo subagent (parent set the surface
