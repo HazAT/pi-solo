@@ -47,15 +47,23 @@ export function parseToolSurfaceProfile(value: string | undefined): SoloToolSurf
 
 const TOOL_SURFACE_PROFILE = parseToolSurfaceProfile(process.env.PI_SOLO_TOOL_SURFACE);
 
+const CORE_DIRECT_MCP_TOOLS = new Set([
+	"scratchpad_write",
+	"scratchpad_read",
+	"scratchpad_list",
+	"todo_create",
+	"todo_list",
+	"todo_update",
+	"todo_complete",
+]);
+
 export function getMcpToolExposure(
 	name: string,
 	profile: SoloToolSurfaceProfile = TOOL_SURFACE_PROFILE,
 ): SoloToolExposure {
 	if (profile === "full") return "direct";
 	if (profile === "minimal") return "gateway";
-	return name.startsWith("todo_") || name.startsWith("scratchpad_") || name.startsWith("lock_")
-		? "direct"
-		: "gateway";
+	return CORE_DIRECT_MCP_TOOLS.has(name) ? "direct" : "gateway";
 }
 
 export function getSoloToolCategory(name: string): string {

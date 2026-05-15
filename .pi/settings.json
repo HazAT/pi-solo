@@ -1,4 +1,11 @@
 {
+  "packages": [
+    {
+      "source": "git:github.com/HazAT/pi-solo",
+      "extensions": [],
+      "skills": []
+    }
+  ],
   "extensions": ["../pi-extension/solo/index.ts"],
   "skills": []
 }

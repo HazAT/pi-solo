@@ -43,10 +43,19 @@ test("parseToolSurfaceProfile — accepts known values case-insensitively", () =
 	assert.equal(parseToolSurfaceProfile("minimal"), "minimal");
 });
 
-test("getMcpToolExposure — core exposes only todos scratchpads and locks", () => {
-	assert.equal(getMcpToolExposure("todo_create", "core"), "direct");
+test("getMcpToolExposure — core exposes only handoff and todo essentials", () => {
 	assert.equal(getMcpToolExposure("scratchpad_write", "core"), "direct");
-	assert.equal(getMcpToolExposure("lock_acquire", "core"), "direct");
+	assert.equal(getMcpToolExposure("scratchpad_read", "core"), "direct");
+	assert.equal(getMcpToolExposure("scratchpad_list", "core"), "direct");
+	assert.equal(getMcpToolExposure("todo_create", "core"), "direct");
+	assert.equal(getMcpToolExposure("todo_list", "core"), "direct");
+	assert.equal(getMcpToolExposure("todo_update", "core"), "direct");
+	assert.equal(getMcpToolExposure("todo_complete", "core"), "direct");
+	assert.equal(getMcpToolExposure("scratchpad_append", "core"), "gateway");
+	assert.equal(getMcpToolExposure("scratchpad_load_from_file", "core"), "gateway");
+	assert.equal(getMcpToolExposure("todo_get", "core"), "gateway");
+	assert.equal(getMcpToolExposure("todo_add_tag", "core"), "gateway");
+	assert.equal(getMcpToolExposure("lock_acquire", "core"), "gateway");
 	assert.equal(getMcpToolExposure("get_project_stats", "core"), "gateway");
 	assert.equal(getMcpToolExposure("list_processes", "core"), "gateway");
 	assert.equal(getMcpToolExposure("help", "core"), "gateway");

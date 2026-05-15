@@ -6,7 +6,7 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 
 - Auto-detects Solo's bundled MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`.
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
-- Queries Solo for its full tool catalog and exposes a curated tool surface. By default, high-frequency `todo_*`, `scratchpad_*`, and `lock_*` MCP tools are **first-class Pi tools**; lower-frequency process/project/admin tools stay discoverable and callable through `solo_tool`.
+- Queries Solo for its full tool catalog and exposes a curated tool surface. By default, only the handoff/workflow essentials (`scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, `todo_complete`) are **first-class Pi tools**; lower-frequency cleanup/admin tools stay discoverable and callable through `solo_tool`.
 - **Solo-native subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
 - **Auto-binds to `SOLO_PROCESS_ID`** when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
 - **Idle-closes the helper** after 5 s of inactivity so it doesn't show up as a persistent subprocess under your Pi row in Solo's sidebar. Bursts of MCP calls reuse one warm helper; quiet periods cost zero subprocesses.
@@ -94,11 +94,11 @@ This happens by default for every subagent. Set `output: false` in the agent def
 
 `PI_SOLO_TOOL_SURFACE` controls how much of Solo's MCP catalog is registered directly in Pi:
 
-| Profile   | Behavior                                                                                                                |
-| --------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `core`    | Default. Direct-register `todo_*`, `scratchpad_*`, and `lock_*`; route all other MCP catalog tools through `solo_tool`. |
-| `full`    | Direct-register every Solo MCP catalog tool.                                                                            |
-| `minimal` | Direct-register no Solo MCP catalog tools; use `solo_tool` for all catalog access.                                      |
+| Profile   | Behavior                                                                                                                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`    | Default. Direct-register only `scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, and `todo_complete`; route all other MCP catalog tools through `solo_tool`. |
+| `full`    | Direct-register every Solo MCP catalog tool.                                                                                                                                                                   |
+| `minimal` | Direct-register no Solo MCP catalog tools; use `solo_tool` for all catalog access.                                                                                                                             |
 
 Hand-written tools remain direct in every profile: `solo_tool`, `subagent`, `subagent_interrupt`, and `subagents_list`.
 
