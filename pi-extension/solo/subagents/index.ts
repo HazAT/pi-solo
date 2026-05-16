@@ -7,7 +7,7 @@
  * when the timer wakes the parent.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -162,17 +162,7 @@ export function resolveEffectiveInteractive(
 	return agentDefs?.interactive ?? false;
 }
 
-// ── Subagent model override (child side) ─────────────────────────────────
-//
-// When a Solo subagent boots, it is just bare `pi` — Solo's `spawn_process`
-// has no knob for per-spawn `--model`. So the spawned subagent inherits the
-// global default model (often Opus/expensive), ignoring the `model:` field
-// in `<agent>.md` frontmatter.
-//
-// This module fixes that from the child side. The parent spawns the surface
-// with the name `"[<agent>] <display>"` (see labelForSurface). We re-read
-// that name from Solo at session_start, look up the agent definition, and
-// call pi.setModel / pi.setThinkingLevel before the first user turn runs.
+// ── Launch args from agent frontmatter ──────────────────────────────────
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 const THINKING_LEVELS = new Set<ThinkingLevel>([
@@ -183,14 +173,6 @@ const THINKING_LEVELS = new Set<ThinkingLevel>([
 	"high",
 	"xhigh",
 ]);
-
-export function parseAgentTagFromProcessName(name: string | undefined): string | null {
-	if (!name) return null;
-	// labelForSurface produces "[<agent>] <display>"; emoji-prefixed fallback
-	// ("🤖 <display>") means the spawn carried no `agent` param — nothing to apply.
-	const match = name.match(/^\[([^\]]+)\]\s/);
-	return match ? match[1]!.trim() : null;
-}
 
 export function parseModelSpec(
 	spec: string | undefined,
@@ -223,97 +205,18 @@ export function normalizeThinkingLevel(value: string | undefined): ThinkingLevel
 	return THINKING_LEVELS.has(normalized as ThinkingLevel) ? (normalized as ThinkingLevel) : null;
 }
 
-export interface SubagentOverrideResult {
-	applied: boolean;
-	reason?: string;
-	agent?: string;
-	model?: string;
-	thinking?: string;
-}
-
 /**
- * Apply the spawned agent's frontmatter `model` / `thinking` to this Pi
- * session. No-op unless we are running inside a Solo agent surface whose
- * name carries an `[<agent>]` prefix and whose `<agent>.md` defines a model.
+ * Build Pi CLI launch args from agent frontmatter model/thinking.
+ * `model: provider/model[:thinking]` -> `["--model", spec]`
+ * `thinking: level` -> `["--thinking", level]` (skipped if model already has :thinking suffix)
  */
-export async function applySubagentModelOverride(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	client: SoloMcpLike,
-): Promise<SubagentOverrideResult> {
-	const rawProcessId = process.env.SOLO_PROCESS_ID;
-	if (!rawProcessId) return { applied: false, reason: "no SOLO_PROCESS_ID" };
-	const processId = Number(rawProcessId);
-	if (!Number.isFinite(processId)) {
-		return { applied: false, reason: "invalid SOLO_PROCESS_ID" };
-	}
-
-	let processName: string | undefined;
-	try {
-		const result = await client.callTool("get_process_status", { process_id: processId });
-		const data = extractToolJson<{ name?: string }>(result);
-		processName = typeof data?.name === "string" ? data.name : undefined;
-	} catch (err) {
-		return {
-			applied: false,
-			reason: `get_process_status failed: ${err instanceof Error ? err.message : String(err)}`,
-		};
-	}
-
-	const agentName = parseAgentTagFromProcessName(processName);
-	if (!agentName) return { applied: false, reason: "process name has no [<agent>] tag" };
-
-	const defs = loadAgentDefaults(agentName);
-	if (!defs) return { applied: false, agent: agentName, reason: "no agent definition on disk" };
-
-	let appliedModel: string | undefined;
-	let appliedThinking: string | undefined;
-
-	const modelSpec = parseModelSpec(defs.model);
-	if (modelSpec) {
-		const model = ctx.modelRegistry.find(modelSpec.provider, modelSpec.modelId);
-		if (!model) {
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					`subagent: model "${defs.model}" not in registry, keeping session default`,
-					"warning",
-				);
-			}
-		} else {
-			const ok = await pi.setModel(model);
-			if (!ok) {
-				if (ctx.hasUI) {
-					ctx.ui.notify(
-						`subagent: no API key for "${defs.model}", keeping session default`,
-						"warning",
-					);
-				}
-			} else {
-				appliedModel = `${modelSpec.provider}/${modelSpec.modelId}`;
-			}
-		}
-	} else if (defs.model && ctx.hasUI) {
-		ctx.ui.notify(`subagent: model spec "${defs.model}" is not "provider/id", ignoring`, "warning");
-	}
-
-	// Thinking level: prefer the `:thinking` suffix on the model spec, then the
-	// standalone `thinking:` frontmatter field.
-	const thinking =
-		(modelSpec && appliedModel ? modelSpec.thinking : undefined) ??
-		normalizeThinkingLevel(defs.thinking);
-	if (thinking) {
-		pi.setThinkingLevel(thinking);
-		appliedThinking = thinking;
-	}
-
-	const applied = Boolean(appliedModel || appliedThinking);
-	return {
-		applied,
-		agent: agentName,
-		model: appliedModel,
-		thinking: appliedThinking,
-		reason: applied ? undefined : "nothing to apply",
-	};
+export function buildPiExtraArgs(defs: AgentDefaults | null): string[] {
+	const args: string[] = [];
+	if (defs?.model?.trim()) args.push("--model", defs.model.trim());
+	const modelHasThinking = Boolean(parseModelSpec(defs?.model)?.thinking);
+	const thinking = modelHasThinking ? null : normalizeThinkingLevel(defs?.thinking);
+	if (thinking) args.push("--thinking", thinking);
+	return args;
 }
 
 // ── Scratchpad artifacts ─────────────────────────────────────────────────
@@ -650,7 +553,9 @@ async function launchSubagent(
 
 	const agentToolId = await resolvePiAgentToolId(client);
 	const tagged = labelForSurface(params.name, params.agent);
-	const surface = await createAgentSurface(client, tagged, agentToolId);
+	const surface = await createAgentSurface(client, tagged, agentToolId, {
+		extraArgs: buildPiExtraArgs(agentDefs),
+	});
 	await renameSurface(client, surface.processId, tagged);
 	await waitForAgentReady(client, surface.processId);
 
@@ -1044,7 +949,6 @@ export const __test__ = {
 	loadAgentDefaults,
 	normalizeThinkingLevel,
 	parseAgentDefinition,
-	parseAgentTagFromProcessName,
 	parseModelSpec,
 	parseWakeMarker,
 	resolveEffectiveInteractive,

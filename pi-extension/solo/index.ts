@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { installSoloHeader, setSoloHeaderStatus } from "./header.ts";
-import { applySubagentModelOverride, initSoloSubagents } from "./subagents/index.ts";
+import { initSoloSubagents } from "./subagents/index.ts";
 
 // -------------------------------------------------------------------------
 // Configuration
@@ -1170,35 +1170,10 @@ export default function soloExtension(pi: ExtensionAPI) {
 
 	// --- Lifecycle ----------------------------------------------------------
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		uiCtx = ctx;
 		installSoloHeader(ctx, pi);
 		await client.start();
-
-		// If this Pi was launched as a Solo subagent (parent set the surface
-		// name to `[<agent>] <display>`), pull the agent's `model` / `thinking`
-		// out of its `.md` frontmatter and apply them before the first user
-		// turn runs. Only honor on initial startup so resumed/forked sessions
-		// keep whatever model the user/last session chose.
-		if (SOLO_PROCESS_ID && event.reason === "startup" && client.isReady()) {
-			try {
-				const override = await applySubagentModelOverride(pi, ctx, client);
-				if (override.applied && uiCtx?.hasUI) {
-					const parts: string[] = [];
-					if (override.model) parts.push(`model=${override.model}`);
-					if (override.thinking) parts.push(`thinking=${override.thinking}`);
-					uiCtx.ui.notify(`Subagent override: ${override.agent} → ${parts.join(", ")}`, "info");
-				}
-			} catch (err) {
-				// Non-fatal: a failed override just means the default model is used.
-				if (uiCtx?.hasUI) {
-					uiCtx.ui.notify(
-						`Subagent model override failed: ${err instanceof Error ? err.message : String(err)}`,
-						"warning",
-					);
-				}
-			}
-		}
 	});
 
 	pi.on("session_shutdown", async () => {

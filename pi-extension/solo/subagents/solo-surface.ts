@@ -53,21 +53,22 @@ export async function createAgentSurface(
 	client: SoloMcpLike,
 	name: string,
 	agentToolId: number,
+	options: { extraArgs?: string[] } = {},
 ): Promise<AgentSurface> {
-	const result = await client.callTool("spawn_process", {
-		kind: "agent",
+	const result = await client.callTool("spawn_agent", {
 		agent_tool_id: agentToolId,
 		name: trimSurfaceName(name),
 		include_agent_instructions: true,
+		...(options.extraArgs && options.extraArgs.length > 0 ? { extra_args: options.extraArgs } : {}),
 	});
-	if (result.isError) throw new Error(`spawn_process failed: ${errorText(result)}`);
+	if (result.isError) throw new Error(`spawn_agent failed: ${errorText(result)}`);
 
 	const data = extractJson<{ process_id?: number; name?: string; agent_instructions?: string }>(
 		result,
 	);
 	const processId = typeof data?.process_id === "number" ? data.process_id : undefined;
 	if (processId == null) {
-		throw new Error(`spawn_process did not return a process_id: ${JSON.stringify(data)}`);
+		throw new Error(`spawn_agent did not return a process_id: ${JSON.stringify(data)}`);
 	}
 	return {
 		processId,
