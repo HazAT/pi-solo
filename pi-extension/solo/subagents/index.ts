@@ -1,7 +1,9 @@
 /**
  * Solo-native subagent orchestration.
  *
- * Subagents run as real Solo agent processes (`spawn_process(kind="agent")`).
+ * Subagents run as real Solo agent processes launched via Solo 0.7.1's
+ * native `spawn_agent` tool. Per-launch Pi flags (e.g. `--model`, `--thinking`)
+ * derived from the agent's frontmatter are passed through `extra_args`.
  * The parent drives the child with one plain-text prompt, schedules Solo's
  * native idle timer, and reads the child's artifact from a Solo scratchpad
  * when the timer wakes the parent.
@@ -37,8 +39,10 @@ interface AgentDefaults {
 	body?: string;
 	output?: string;
 
-	// Parsed for listing/tolerance only. kind="agent" cannot honor per-spawn
-	// model/tool/session/env customization.
+	// `model` and `thinking` are converted into Pi CLI `extra_args` at launch
+	// time by `buildPiExtraArgs`. The remaining fields are parsed for listing
+	// and tolerance only; Solo agent processes do not honor per-spawn
+	// tool/session/env customization.
 	model?: string;
 	tools?: string;
 	skills?: string;

@@ -1,9 +1,11 @@
 /**
  * Thin Solo backend for subagents.
  *
- * v2 subagents are real Solo agent processes (`spawn_process(kind="agent")`).
- * The parent drives them with one plain-text `send_input` call and relies on
- * Solo's idle timer primitive to wake the parent when the child goes idle.
+ * v2 subagents are real Solo agent processes launched via Solo 0.7.1's
+ * native `spawn_agent` tool, with per-launch Pi CLI flags forwarded through
+ * `extra_args`. The parent drives them with one plain-text `send_input` call
+ * and relies on Solo's idle timer primitive to wake the parent when the
+ * child goes idle.
  */
 
 /** Minimal slice of SoloMcpClient that this module uses. */
