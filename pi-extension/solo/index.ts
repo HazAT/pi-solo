@@ -238,7 +238,7 @@ interface McpInitializeResult {
 	capabilities?: unknown;
 }
 
-interface WhoamiResult {
+interface IdentifySessionResult {
 	process_id?: string;
 	actor?: string;
 	project?: { id?: string; name?: string; path?: string };
@@ -325,7 +325,7 @@ export class SoloMcpClient {
 		const before = this.tools.map((t) => t.name).join(",");
 		await this.refreshTools();
 		const after = this.tools.map((t) => t.name).join(",");
-		if (before !== after) await this.tryWhoami();
+		if (before !== after) await this.identifySession();
 		this.touchIdle();
 		return { changed: before !== after };
 	}
@@ -353,8 +353,7 @@ export class SoloMcpClient {
 				this.spawnChild();
 				await this.handshake();
 				await this.refreshTools();
-				if (SOLO_PROCESS_ID) await this.tryBindProcess(SOLO_PROCESS_ID);
-				if (!this.boundProject) await this.tryWhoami();
+				await this.identifySession();
 				this.state = "ready";
 				this.lastError = undefined;
 				this.onStateChange();
@@ -531,32 +530,21 @@ export class SoloMcpClient {
 		this.tools = Array.isArray(result?.tools) ? result.tools : [];
 	}
 
-	private async tryBindProcess(processId: string): Promise<void> {
+	private async identifySession(): Promise<void> {
 		try {
-			await this.request("tools/call", {
-				name: "bind_session_process",
-				arguments: { process_id: processId },
-			});
-			this.boundProcessId = processId;
-		} catch (err) {
-			// Non-fatal: server may not have this tool enabled or processId invalid.
-			this.lastError = err instanceof Error ? err.message : String(err);
-		}
-	}
-
-	private async tryWhoami(): Promise<void> {
-		try {
+			const args = SOLO_PROCESS_ID ? { solo_process_id: Number(SOLO_PROCESS_ID) } : {};
 			const r = await this.request<McpToolCallResult>("tools/call", {
-				name: "whoami",
-				arguments: {},
+				name: "identify_session",
+				arguments: args,
 			});
-			const blob = extractStructured<WhoamiResult>(r) ?? extractTextJson<WhoamiResult>(r);
-			if (blob) {
-				this.boundProcessId = this.boundProcessId ?? blob.process_id;
-				this.boundProject = blob.project;
+			const data =
+				extractStructured<IdentifySessionResult>(r) ?? extractTextJson<IdentifySessionResult>(r);
+			if (data) {
+				if (data.process_id) this.boundProcessId = data.process_id;
+				if (data.project) this.boundProject = data.project;
 			}
 		} catch {
-			// ignore — whoami is informational
+			// Non-fatal: identify_session is informational
 		}
 	}
 
@@ -727,8 +715,6 @@ function formatStatus(client: SoloMcpClient): string {
 	if (groups) lines.push(`Groups: ${groups}`);
 	if (client.boundProcessId) {
 		lines.push(`Bound process: ${client.boundProcessId}`);
-	} else if (SOLO_PROCESS_ID) {
-		lines.push(`Bound process: ${SOLO_PROCESS_ID} (env, not confirmed)`);
 	}
 	if (client.boundProject) {
 		lines.push(`Project: ${client.boundProject.name ?? "?"} (${client.boundProject.path ?? "?"})`);
