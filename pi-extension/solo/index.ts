@@ -73,9 +73,21 @@ export function getSoloToolCategory(name: string): string {
 	if (name.startsWith("lock_")) return "locks";
 	if (name.startsWith("timer_")) return "timers";
 	if (name.startsWith("kv_")) return "kv";
-	if (name === "whoami" || name === "bind_session_process" || name === "list_projects")
+	if (
+		name === "whoami" ||
+		name === "identify_session" ||
+		name === "bind_session_process" ||
+		name === "list_projects"
+	)
 		return "session";
 	if (name === "select_project" || name === "register_agent") return "session";
+	if (
+		name === "get_project" ||
+		name === "create_project" ||
+		name === "rename_project" ||
+		name === "delete_project"
+	)
+		return "projects";
 	if (name === "get_project_status" || name === "get_project_stats") return "inspection";
 	if (name === "help" || name === "setup_agent_integration") return "docs";
 	if (/service|port|wait_for_bound_port/.test(name)) return "readiness";
@@ -615,21 +627,23 @@ export function extractStructured<T>(r: McpToolCallResult): T | undefined {
 
 // JSON Schema sanitizer: MCP tools sometimes ship empty/loose schemas. Pi's
 // parameter system wants an object schema with at least { type: "object" }.
-export function normalizeInputSchema(schema?: McpToolDef["inputSchema"]): {
-	type: "object";
-	properties: Record<string, unknown>;
-	required?: string[];
-	additionalProperties?: boolean;
-} {
+export function normalizeInputSchema(schema?: McpToolDef["inputSchema"]): Record<string, unknown> {
 	if (!schema || typeof schema !== "object") {
 		return { type: "object", properties: {}, additionalProperties: true };
 	}
-	return {
+	const normalized = schema as Record<string, unknown>;
+	const result: Record<string, unknown> = {
+		...normalized,
 		type: "object",
-		properties: schema.properties ?? {},
-		...(schema.required && schema.required.length ? { required: schema.required } : {}),
-		additionalProperties: (schema as any).additionalProperties ?? true,
+		properties: isPlainRecord(normalized.properties) ? normalized.properties : {},
+		additionalProperties: normalized.additionalProperties ?? true,
 	};
+	if (Array.isArray(normalized.required) && (normalized.required as unknown[]).length) {
+		result.required = normalized.required;
+	} else {
+		delete result.required;
+	}
+	return result;
 }
 
 export type SoloToolListInclude = "gateway" | "direct" | "all";
@@ -780,7 +794,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function gatewayCallRequiresReason(name: string): boolean {
+export function gatewayCallRequiresReason(name: string): boolean {
 	return !(
 		name.startsWith("list_") ||
 		name.endsWith("_list") ||
@@ -789,7 +803,10 @@ function gatewayCallRequiresReason(name: string): boolean {
 		name.startsWith("wait_for_") ||
 		name === "help" ||
 		name === "whoami" ||
+		name === "identify_session" ||
 		name === "scratchpad_read" ||
+		name === "scratchpad_find" ||
+		name === "scratchpad_tail" ||
 		name === "todo_get" ||
 		name === "lock_status" ||
 		name === "services_list"
@@ -1353,8 +1370,9 @@ type ToolResult = {
 // Tools whose result is worth augmenting with a Solo keyboard shortcut hint
 // so the human can jump to the relevant process in the sidebar with one
 // keypress. Cheap extra calls (list_projects + list_processes) on success.
-const SHORTCUT_TOOLS = new Set([
+export const SHORTCUT_TOOLS = new Set([
 	"spawn_process",
+	"spawn_agent",
 	"start_process",
 	"restart_process",
 	"get_process_status",

@@ -29,6 +29,8 @@ import {
 	parseToolSurfaceProfile,
 	pickSubject,
 	str,
+	gatewayCallRequiresReason,
+	SHORTCUT_TOOLS,
 } from "../pi-extension/solo/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -254,6 +256,57 @@ test("normalizeInputSchema — preserves properties and required", () => {
 test("normalizeInputSchema — drops empty required arrays", () => {
 	const out = normalizeInputSchema({ type: "object", properties: {}, required: [] });
 	assert.equal("required" in out, false);
+});
+
+test("normalizeInputSchema — preserves $defs, $schema, oneOf, anyOf", () => {
+	const schema = {
+		$schema: "http://json-schema.org/draft-07/schema",
+		type: "object" as const,
+		properties: { mode: { $ref: "#/$defs/Mode" } },
+		$defs: { Mode: { enum: ["full", "headings"] } },
+		required: ["mode"],
+		additionalProperties: false,
+	};
+	const out = normalizeInputSchema(schema);
+	assert.deepEqual((out as any)["$defs"], { Mode: { enum: ["full", "headings"] } });
+	assert.equal((out as any)["$schema"], "http://json-schema.org/draft-07/schema");
+	assert.deepEqual(out.required, ["mode"]);
+});
+
+test("getSoloToolCategory — identify_session is session", () => {
+	assert.equal(getSoloToolCategory("identify_session"), "session");
+});
+
+test("getSoloToolCategory — project tools are projects", () => {
+	assert.equal(getSoloToolCategory("create_project"), "projects");
+	assert.equal(getSoloToolCategory("rename_project"), "projects");
+	assert.equal(getSoloToolCategory("delete_project"), "projects");
+	assert.equal(getSoloToolCategory("get_project"), "projects");
+});
+
+test("getSoloToolCategory — spawn_agent is processes", () => {
+	assert.equal(getSoloToolCategory("spawn_agent"), "processes");
+});
+
+test("SHORTCUT_TOOLS — includes spawn_agent", () => {
+	assert.equal(SHORTCUT_TOOLS.has("spawn_agent"), true);
+});
+
+test("gatewayCallRequiresReason — read-only tools do not need reason", () => {
+	assert.equal(gatewayCallRequiresReason("identify_session"), false);
+	assert.equal(gatewayCallRequiresReason("scratchpad_find"), false);
+	assert.equal(gatewayCallRequiresReason("scratchpad_tail"), false);
+	assert.equal(gatewayCallRequiresReason("scratchpad_tags_list"), false);
+	assert.equal(gatewayCallRequiresReason("list_projects"), false);
+});
+
+test("gatewayCallRequiresReason — mutating tools require reason", () => {
+	assert.equal(gatewayCallRequiresReason("scratchpad_edit"), true);
+	assert.equal(gatewayCallRequiresReason("scratchpad_append_section"), true);
+	assert.equal(gatewayCallRequiresReason("spawn_agent"), true);
+	assert.equal(gatewayCallRequiresReason("create_project"), true);
+	assert.equal(gatewayCallRequiresReason("rename_project"), true);
+	assert.equal(gatewayCallRequiresReason("delete_project"), true);
 });
 
 // ---------------------------------------------------------------------------
