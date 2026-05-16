@@ -1262,7 +1262,9 @@ export default function soloExtension(pi: ExtensionAPI) {
 			try {
 				await client.identifySession();
 				const pid = client.boundProcessId ?? "none";
-				const proj = client.boundProject ?? "none";
+				const proj = client.boundProject
+					? `${client.boundProject.name ?? "?"} (${client.boundProject.path ?? "?"})`
+					: "none";
 				ctx.ui.notify(`Solo identity refreshed — process: ${pid}, project: ${proj}`, "info");
 			} catch (err) {
 				ctx.ui.notify(

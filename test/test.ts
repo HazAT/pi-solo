@@ -765,7 +765,7 @@ test("buildShortWakeBody — done variant references scratchpad and close_proces
 	assert.match(body, /Sub-agent "Scout: x"/);
 	assert.match(body, /Solo agent #64/);
 	assert.match(body, /scratchpad #13/);
-	assert.match(body, /close_process\(64\)/);
+	assert.match(body, /solo_tool.*close_process.*process_id.*64/s);
 });
 
 test("buildShortWakeBody — interactive variant tells parent to keep pane open", () => {

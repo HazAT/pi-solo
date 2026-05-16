@@ -471,7 +471,7 @@ export function buildShortWakeBody(params: {
 	return [
 		`Sub-agent "${params.name}" (Solo agent #${params.processId}) reached idle.`,
 		scratchpadRef,
-		`When done, close the pane with close_process(${params.processId}).`,
+		`When done, close the pane with solo_tool({ action: "call", name: "close_process", arguments: { process_id: ${params.processId} }, reason: "close completed subagent pane" }).`,
 	].join(" ");
 }
 
