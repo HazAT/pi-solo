@@ -9,8 +9,8 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 - Auto-detects Solo's bundled MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`.
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
 - Queries Solo for its full tool catalog and exposes a curated tool surface. By default, only the handoff/workflow essentials (`scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, `todo_complete`) are **first-class Pi tools**; lower-frequency cleanup/admin tools stay discoverable and callable through `solo_tool`.
-- **Solo-native subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
-- **Auto-binds to `SOLO_PROCESS_ID`** when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
+- **Solo-native subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes via Solo's native `spawn_agent` MCP tool — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Agent frontmatter `model` and `thinking` are forwarded as per-launch Pi `extra_args`, so the child starts on the right model/thinking without any post-boot self-mutation. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
+- **Auto-binds to `SOLO_PROCESS_ID`** via Solo's canonical `identify_session` tool when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
 - **Idle-closes the helper** after 5 s of inactivity so it doesn't show up as a persistent subprocess under your Pi row in Solo's sidebar. Bursts of MCP calls reuse one warm helper; quiet periods cost zero subprocesses.
 - **Renders keyboard shortcuts** on spawn/start/restart/status results so you can press `⌥3 · ⌘5` (or whatever the position resolves to) to jump straight to the relevant agent in Solo's sidebar.
 - Polished `renderCall`/`renderResult` for direct Solo tools — no raw JSON dumps in your tool log.
@@ -62,9 +62,9 @@ The status dot reflects the SoloMcpClient state — green when connected, yellow
 ## Setup
 
 1. Install Solo from <https://soloterm.com>.
-2. In Solo: `Cmd+,` → **MCP** tab → toggle MCP on.
+2. In Solo: `Settings → MCP` → toggle MCP on.
 3. _(Optional)_ Enable Todos, Scratchpads, Timers, Key-value in the same panel to expose those tool groups.
-4. **Required for subagents:** In Solo: `Cmd+,` → **Agents** tab → **Add tool**. Configure Pi as a Generic agent tool with command `pi`. `subagent` resolves this tool and spawns it with `kind="agent"`.
+4. **Required for subagents:** In Solo: `Settings → Agents` → **Add tool**. Configure Pi as a Generic agent tool with command `pi`. `subagent` resolves this tool and launches it through Solo's native `spawn_agent`.
 
 ## Commands
 
@@ -79,7 +79,7 @@ The status dot reflects the SoloMcpClient state — green when connected, yellow
 
 ## Solo subagents
 
-Solo subagents lean into Solo's own primitives. Subagents run as real Solo agent processes (`spawn_process(kind="agent")`) that you can see, attach to (`⌘N`), and re-focus from the sidebar. Solo provides the agent icon and `agent_state` tracking; `timer_fire_when_idle_any` wakes the parent when the child goes idle or hits the max wait.
+Solo subagents lean into Solo's own primitives. Subagents are spawned with Solo's native `spawn_agent` MCP tool. Agent definition `model:` and `thinking:` frontmatter are passed to Pi as per-launch `extra_args`; Solo's saved agent tool defaults are not mutated. You can see, attach to (`⌘N`), and re-focus children from the sidebar. Solo provides the agent icon and `agent_state` tracking; `timer_fire_when_idle_any` wakes the parent when the child goes idle or hits the max wait.
 
 ### Tools
 
@@ -92,7 +92,7 @@ Solo subagents lean into Solo's own primitives. Subagents run as real Solo agent
 
 ### Agent definitions
 
-Drop a `.md` file in `~/.pi/agent/agents/<name>.md` (or `.pi/agents/<name>.md` for project-local overrides). v2 uses the frontmatter for `name`, `description`, `interactive`, `output`, `model`, and `thinking`, and inlines the markdown body into the first prompt as the agent's identity. `model` (and the optional `:<thinking>` suffix or standalone `thinking:` field) are applied in the child via `pi.setModel` / `pi.setThinkingLevel` at session start — the parent sets the surface name to `[<agent>] <display>` so the child can find its definition. Per-spawn `tools`, `skills`, `cwd`, and session-mode fields are tolerated for existing files but are not honored because Solo runs the configured agent tool command (`pi`) directly.
+Drop a `.md` file in `~/.pi/agent/agents/<name>.md` (or `.pi/agents/<name>.md` for project-local overrides). The frontmatter carries `name`, `description`, `interactive`, `output`, `model`, and `thinking`, and the markdown body is inlined into the first prompt as the agent's identity. `model` (with an optional `:<thinking>` suffix) and a standalone `thinking:` field are translated into Pi CLI flags (`--model <spec>`, `--thinking <level>`) and handed to Solo's `spawn_agent` as `extra_args`, so the child starts on the right model/thinking from launch — no child-side override step. Per-spawn `tools`, `skills`, `cwd`, and session-mode fields are tolerated for existing files but are not honored because Solo runs the configured agent tool command (`pi`) directly.
 
 ```markdown
 ---
@@ -119,11 +119,11 @@ This happens by default for every subagent. Set `output: false` in the agent def
 
 `PI_SOLO_TOOL_SURFACE` controls how much of Solo's MCP catalog is registered directly in Pi:
 
-| Profile   | Behavior                                                                                                                                                                                                       |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `core`    | Default. Direct-register only `scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, and `todo_complete`; route all other MCP catalog tools through `solo_tool`. |
-| `full`    | Direct-register every Solo MCP catalog tool.                                                                                                                                                                   |
-| `minimal` | Direct-register no Solo MCP catalog tools; use `solo_tool` for all catalog access.                                                                                                                             |
+| Profile   | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`    | Default. Direct-register only the curated handoff/workflow essentials — `scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, and `todo_complete` — and route every other MCP catalog tool through `solo_tool`. New Solo 0.7.1 tools (`spawn_agent`, `identify_session`, `scratchpad_find`, `scratchpad_tail`, `scratchpad_edit`, `scratchpad_append_section`, project admin) stay available via the gateway and are intentionally not promoted to direct. |
+| `full`    | Direct-register every Solo MCP catalog tool.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `minimal` | Direct-register no Solo MCP catalog tools; use `solo_tool` for all catalog access.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 Hand-written tools remain direct in every profile: `solo_tool`, `subagent`, `subagent_interrupt`, and `subagents_list`.
 
@@ -168,15 +168,15 @@ Solo's sidebar shows every Pi process's subprocess tree. A long-running helper w
 
 ### Auto-binding
 
-When Pi is launched as a Solo agent (Solo sets `SOLO_PROCESS_ID` in the environment), the extension automatically calls `bind_session_process` on initialization. This ties this Pi process's MCP session to its own Solo process row, so timers it sets, locks it acquires, and todos it owns all belong to the right Solo identity.
+When Pi is launched as a Solo agent (Solo sets `SOLO_PROCESS_ID` in the environment), the extension calls Solo's canonical `identify_session` on initialization, passing `solo_process_id` when available. The response populates the bound process/project so timers it sets, locks it acquires, and todos it owns all belong to the right Solo identity. No fallback to the older `whoami` / `bind_session_process` flow is kept — Solo 0.7.1+ is the supported baseline.
 
 ### Subagent wake-up
 
-`subagent` launches the configured Pi agent tool as `spawn_process(kind="agent")`, waits until Solo reports `agent_state.idle`, schedules `timer_fire_when_idle_any`, and then sends the wrapped task as one user turn. When the child later goes idle (or reaches the 30 minute max wait), Solo injects a plain wake-up body into the parent Pi process with the child `process_id` and scratchpad id. The parent reads the scratchpad and closes the child pane when finished.
+`subagent` launches the configured Pi agent tool through Solo's native `spawn_agent`, forwarding any `model` / `thinking` from the agent definition as `extra_args` (`--model …`, `--thinking …`). It then waits until Solo reports `agent_state.idle`, schedules `timer_fire_when_idle_any`, and sends the wrapped task as one user turn. When the child later goes idle (or reaches the 30 minute max wait), Solo injects a plain wake-up body into the parent Pi process with the child `process_id` and scratchpad id. The parent reads the scratchpad and closes the child pane when finished.
 
 ### Keyboard hints
 
-After successful `spawn_process` / `start_process` / `restart_process` / `get_process_status` calls, the extension does two cheap follow-up MCP calls (`list_projects` + `list_processes`) to figure out where the target sits in Solo's sidebar, then renders the matching keyboard shortcut:
+After successful `spawn_agent` / `spawn_process` / `start_process` / `restart_process` / `get_process_status` calls, the extension does two cheap follow-up MCP calls (`list_projects` + `list_processes`) to figure out where the target sits in Solo's sidebar, then renders the matching keyboard shortcut:
 
 - Same project, position ≤ 9 → `⌘5 to jump`
 - Different project, both ≤ 9 → `⌥3 · ⌘5 to jump`
@@ -228,7 +228,7 @@ To cut a release, ask Pi: “release 0.2.0” (the `.pi/skills/release/SKILL.md`
 
 ## Status
 
-Built and tested on macOS 14+, Pi 0.74+, Solo 1.x. Linux/Windows: untested (Solo is macOS-only anyway).
+Built and tested on macOS 14+, Pi 0.74+, **Solo 0.7.1+** (the supported and tested baseline; older Solo versions are not supported). Linux/Windows: untested (Solo is macOS-only anyway).
 
 ## License
 
