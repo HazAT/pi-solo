@@ -78,9 +78,11 @@ function gradientText(text: string, phase: number) {
 	return chars.map((c, i) => (c === " " ? c : fg(sampleGradient(i / span + phase), c))).join("");
 }
 
+const ANSI_SGR_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
 function visualLen(text: string) {
 	// Strip ANSI for width math.
-	return [...text.replace(/\x1b\[[0-9;]*m/g, "")].length;
+	return [...text.replace(ANSI_SGR_RE, "")].length;
 }
 
 function center(text: string, width: number) {
