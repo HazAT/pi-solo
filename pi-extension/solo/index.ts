@@ -575,6 +575,12 @@ export class SoloMcpClient {
 // -------------------------------------------------------------------------
 // Helpers: MCP content → Pi content
 
+export function isSoloFailureText(text: string | undefined): boolean {
+	return (
+		/^Solo tool call failed:/m.test(text ?? "") || /^Validation failed for tool/m.test(text ?? "")
+	);
+}
+
 export function mcpContentToPi(items?: McpContentItem[]): Array<{ type: "text"; text: string }> {
 	if (!items?.length) return [{ type: "text", text: "(no content)" }];
 	const out: Array<{ type: "text"; text: string }> = [];
@@ -940,9 +946,11 @@ function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
 					}
 				}
 
+				const content = mcpContentToPi(result.content);
+				const textFailure = content.some((item) => isSoloFailureText(item.text));
 				return {
-					content: mcpContentToPi(result.content),
-					isError: result.isError === true,
+					content,
+					isError: result.isError === true || textFailure,
 					details,
 				};
 			} catch (err) {
@@ -1058,9 +1066,11 @@ export default function soloExtension(pi: ExtensionAPI) {
 							}
 						}
 
+						const content = mcpContentToPi(result.content);
+						const textFailure = content.some((item) => isSoloFailureText(item.text));
 						return {
-							content: mcpContentToPi(result.content),
-							isError: result.isError === true,
+							content,
+							isError: result.isError === true || textFailure,
 							details,
 						};
 					} catch (err) {

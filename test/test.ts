@@ -30,6 +30,7 @@ import {
 	pickSubject,
 	str,
 	gatewayCallRequiresReason,
+	isSoloFailureText,
 	SHORTCUT_TOOLS,
 } from "../pi-extension/solo/index.ts";
 
@@ -1038,4 +1039,66 @@ test("getDirectToolDescriptionOverride — explains the scratchpad_read default"
 test("getDirectToolDescriptionOverride — no override for tools we leave alone", () => {
 	assert.equal(getDirectToolDescriptionOverride("todo_create"), undefined);
 	assert.equal(getDirectToolDescriptionOverride("scratchpad_write"), undefined);
+});
+
+// isSoloFailureText
+test("isSoloFailureText — detects Solo tool call failed prefix", () => {
+	assert.ok(isSoloFailureText("Solo tool call failed: timeout"));
+	assert.ok(isSoloFailureText("some preamble\nSolo tool call failed: something"));
+});
+
+test("isSoloFailureText — detects Validation failed for tool prefix", () => {
+	assert.ok(isSoloFailureText("Validation failed for tool scratchpad_read: bad arg"));
+});
+
+test("isSoloFailureText — returns false for normal content", () => {
+	assert.ok(!isSoloFailureText("All good"));
+	assert.ok(!isSoloFailureText(undefined));
+	assert.ok(!isSoloFailureText(""));
+});
+
+// normalizeInputSchema — schema regression: scratchpad_read mode ($defs + anyOf enum/null)
+test("normalizeInputSchema — preserves $defs and anyOf nullable enum (scratchpad_read.mode style)", () => {
+	const schema = {
+		type: "object",
+		$defs: {
+			ScratchpadReadMode: { type: "string", enum: ["full", "headings", "section", "content"] },
+		},
+		properties: {
+			scratchpad_id: { type: "integer" },
+			mode: {
+				anyOf: [{ $ref: "#/$defs/ScratchpadReadMode" }, { type: "null" }],
+				description: "Read mode.",
+			},
+		},
+		required: ["scratchpad_id"],
+	};
+	const out = normalizeInputSchema(schema) as any;
+	assert.deepEqual(out.$defs, schema.$defs);
+	assert.deepEqual(out.properties.mode.anyOf, schema.properties.mode.anyOf);
+	assert.equal(out.properties.mode.description, "Read mode.");
+	assert.deepEqual(out.required, ["scratchpad_id"]);
+});
+
+// normalizeInputSchema — schema regression: todo_complete response_mode (enum/null)
+test("normalizeInputSchema — preserves anyOf nullable enum without $defs (todo_complete.response_mode style)", () => {
+	const schema = {
+		type: "object",
+		$defs: {
+			TodoWriteResponseMode: { type: "string", enum: ["slim", "rich"] },
+		},
+		properties: {
+			todo_id: { type: "integer" },
+			response_mode: {
+				anyOf: [{ $ref: "#/$defs/TodoWriteResponseMode" }, { type: "null" }],
+				default: null,
+				description: "Optional response shape.",
+			},
+		},
+		required: ["todo_id", "completed"],
+	};
+	const out = normalizeInputSchema(schema) as any;
+	assert.deepEqual(out.$defs, schema.$defs);
+	assert.deepEqual(out.properties.response_mode.anyOf, schema.properties.response_mode.anyOf);
+	assert.equal(out.properties.response_mode.default, null);
 });
