@@ -530,7 +530,7 @@ export class SoloMcpClient {
 		this.tools = Array.isArray(result?.tools) ? result.tools : [];
 	}
 
-	private async identifySession(): Promise<void> {
+	async identifySession(): Promise<void> {
 		try {
 			const args = SOLO_PROCESS_ID ? { solo_process_id: Number(SOLO_PROCESS_ID) } : {};
 			const r = await this.request<McpToolCallResult>("tools/call", {
@@ -1267,23 +1267,23 @@ export default function soloExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("solo-bind", {
-		description: "Manually bind this Pi session to a Solo process ID",
-		handler: async (args, ctx) => {
-			const processId = args.trim();
-			if (!processId) {
-				ctx.ui.notify("Usage: /solo-bind <solo-process-id>", "warning");
-				return;
-			}
+	pi.registerCommand("solo-identify", {
+		description: "Refresh this session's Solo identity (process and project binding)",
+		handler: async (_args, ctx) => {
 			if (!client.isReady()) {
 				ctx.ui.notify("Solo not ready — run /solo-reconnect first.", "warning");
 				return;
 			}
 			try {
-				await client.callTool("bind_session_process", { process_id: processId });
-				ctx.ui.notify(`Bound to Solo process ${processId}`, "info");
+				await client.identifySession();
+				const pid = client.boundProcessId ?? "none";
+				const proj = client.boundProject ?? "none";
+				ctx.ui.notify(`Solo identity refreshed — process: ${pid}, project: ${proj}`, "info");
 			} catch (err) {
-				ctx.ui.notify(`Bind failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+				ctx.ui.notify(
+					`Identify failed: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
 			}
 		},
 	});
