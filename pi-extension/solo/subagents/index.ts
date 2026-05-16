@@ -311,6 +311,7 @@ interface BuildTaskParams {
 	task: string;
 	artifactScratchpadName?: string;
 	artifactScratchpadId?: number;
+	artifactScratchpadRevision?: number;
 	interactive?: boolean;
 }
 
@@ -334,9 +335,11 @@ export function buildWrappedTask(params: BuildTaskParams): string {
 		const idText =
 			params.artifactScratchpadId != null ? ` (id ${params.artifactScratchpadId})` : "";
 		const writeHint =
-			params.artifactScratchpadId != null
-				? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId} and your content — you do not need expected_revision. If the tool ever returns a revision-mismatch error, retry once using the \`current\` value from the error message; do not call scratchpad_read first.`
-				: " Call scratchpad_write with that name and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the `current` value from the error message.";
+			params.artifactScratchpadId != null && params.artifactScratchpadRevision != null
+				? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId}, expected_revision: ${params.artifactScratchpadRevision}, and your content. If the tool ever returns a revision-mismatch error, retry once using the \`current\` value from the error message; do not call scratchpad_read first.`
+				: params.artifactScratchpadId != null
+					? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId} and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the \`current\` value from the error message.`
+					: " Call scratchpad_write with that name and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the `current` value from the error message.";
 		sections.push(
 			[
 				"### Artifact (Solo scratchpad)",
@@ -578,6 +581,7 @@ async function launchSubagent(
 		task: params.task,
 		artifactScratchpadName: artifact?.name,
 		artifactScratchpadId: artifact?.scratchpadId,
+		artifactScratchpadRevision: artifact?.revision,
 		interactive,
 	});
 

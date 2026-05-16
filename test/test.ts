@@ -524,7 +524,7 @@ test("buildWrappedTask — omits artifact block without scratchpad", () => {
 	assert.doesNotMatch(wrapped, /Artifact \(Solo scratchpad\)/);
 });
 
-test("buildWrappedTask — includes scratchpad id and retry-on-mismatch guidance", () => {
+test("buildWrappedTask — includes scratchpad id and retry-on-mismatch guidance without revision", () => {
 	const wrapped = buildWrappedTask({
 		task: "do the thing",
 		artifactScratchpadName: "planner/2026-05-13-plan",
@@ -533,12 +533,25 @@ test("buildWrappedTask — includes scratchpad id and retry-on-mismatch guidance
 	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
 	assert.match(wrapped, /planner\/2026-05-13-plan/);
 	assert.match(wrapped, /scratchpad_id: 42/);
-	// We no longer pre-bake a revision number into the prompt; the subagent
-	// should write without expected_revision and only retry on mismatch.
 	assert.doesNotMatch(wrapped, /expected_revision: \d+/);
 	assert.match(wrapped, /revision-mismatch/);
 	assert.match(wrapped, /retry once/);
 	assert.doesNotMatch(wrapped, /subagent_done/);
+});
+
+test("buildWrappedTask — includes expected_revision when pre-created scratchpad revision is known", () => {
+	const wrapped = buildWrappedTask({
+		task: "do the thing",
+		artifactScratchpadName: "worker/2026-05-13-plan",
+		artifactScratchpadId: 42,
+		artifactScratchpadRevision: 1,
+	});
+	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
+	assert.match(wrapped, /scratchpad_id: 42/);
+	assert.match(wrapped, /expected_revision: 1/);
+	assert.match(wrapped, /revision-mismatch/);
+	assert.match(wrapped, /retry once/);
+	assert.doesNotMatch(wrapped, /you do not need expected_revision/);
 });
 
 test("buildWrappedTask — interactive variant tells child to wait for continuation", () => {
