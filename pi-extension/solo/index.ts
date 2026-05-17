@@ -1169,15 +1169,6 @@ export default function soloExtension(pi: ExtensionAPI) {
 
 	registerSoloToolGateway(pi, client);
 
-	// Hook up the Solo-native subagent module. We pass the live SoloMcpClient
-	// in so subagents can call spawn_process / send_input / scratchpad_write
-	// without re-warming a second helper. Subagents are tool-gated on PI_DENY_TOOLS
-	// internally so spawning: false agents still get their tools hidden.
-	initSoloSubagents(pi, {
-		client,
-		isClientReady: () => client.isReady() && !client.isMcpDisabled(),
-	});
-
 	// --- Lifecycle ----------------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -1192,6 +1183,14 @@ export default function soloExtension(pi: ExtensionAPI) {
 			spinnerTimer = undefined;
 		}
 		client.stop();
+	});
+
+	// Hook up the Solo-native subagent module after the main lifecycle hooks so
+	// resume-on-startup runs after the MCP client has warmed and identified this
+	// parent Solo process.
+	initSoloSubagents(pi, {
+		client,
+		isClientReady: () => client.isReady() && !client.isMcpDisabled(),
 	});
 
 	// --- Commands -----------------------------------------------------------

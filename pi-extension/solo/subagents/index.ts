@@ -9,17 +9,19 @@
  * when the timer wakes the parent.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
 	type SoloMcpLike,
 	closeSurface,
 	createAgentSurface,
+	getAgentProcessState,
 	renameSurface,
 	resolvePiAgentToolId,
 	scheduleIdleWake,
@@ -223,6 +225,43 @@ export function buildPiExtraArgs(defs: AgentDefaults | null): string[] {
 	return args;
 }
 
+function safeSlug(value: string, fallback: string, maxLength = 48): string {
+	const slug = value
+		.toLowerCase()
+		.replace(/[^a-z0-9-]/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "")
+		.slice(0, maxLength);
+	return slug || fallback;
+}
+
+function expandTilde(path: string): string {
+	return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+export function resolveSessionPathForLaunch(path: string, cwd = process.cwd()): string {
+	const expanded = expandTilde(path.trim());
+	return expanded.startsWith("/") ? expanded : resolve(cwd, expanded);
+}
+
+export function buildChildSessionFile(
+	sessionDir: string | undefined,
+	displayName: string,
+): string | undefined {
+	if (!sessionDir?.trim()) return undefined;
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	return join(sessionDir, `${ts}_${safeSlug(displayName, "subagent")}_${randomUUID()}.jsonl`);
+}
+
+export function buildSubagentLaunchArgs(
+	defs: AgentDefaults | null,
+	childSessionFile?: string,
+): string[] {
+	const args = buildPiExtraArgs(defs);
+	if (childSessionFile) args.push("--session", childSessionFile);
+	return args;
+}
+
 // ── Scratchpad artifacts ─────────────────────────────────────────────────
 
 /** Generate a unique scratchpad name for a subagent artifact. */
@@ -351,6 +390,28 @@ export function buildWrappedTask(params: BuildTaskParams): string {
 
 	sections.push(["---", params.task].join("\n\n"));
 	return sections.join("\n\n");
+}
+
+export function buildResumePrompt(params: {
+	name: string;
+	task?: string;
+	artifactScratchpadName?: string;
+	artifactScratchpadId?: number;
+	prompt?: string;
+}): string {
+	const artifact = params.artifactScratchpadName
+		? `Artifact scratchpad: "${params.artifactScratchpadName}"${params.artifactScratchpadId != null ? ` (id ${params.artifactScratchpadId})` : ""}. Keep using this scratchpad; do not create a replacement.`
+		: "No artifact scratchpad was pre-created for this subagent.";
+	return [
+		`Resume the previous subagent session for "${params.name}".`,
+		"You were relaunched with the same Pi --session file, so continue from the existing conversation context rather than starting over.",
+		artifact,
+		params.task ? `Original task:\n${params.task}` : undefined,
+		params.prompt ? `Additional resume instruction:\n${params.prompt}` : undefined,
+		"If the task is already complete, ensure the artifact is up to date, summarize, and then stop at idle.",
+	]
+		.filter(Boolean)
+		.join("\n\n");
 }
 
 function quoteMarkerValue(value: string): string {
@@ -499,6 +560,30 @@ const SubagentParams = Type.Object({
 				"Pre-create a Solo scratchpad for the subagent's artifact. Defaults to true unless the agent definition sets output: false.",
 		}),
 	),
+	resumeSession: Type.Optional(
+		Type.String({
+			description:
+				"Existing Pi session file to use for the child. When omitted, pi-solo creates a child session file and passes it to Pi as --session.",
+		}),
+	),
+});
+
+const SubagentResumeParams = Type.Object({
+	id: Type.Optional(Type.String({ description: "pi-solo subagent id to resume" })),
+	processId: Type.Optional(Type.Number({ description: "Solo process id to resume" })),
+	session: Type.Optional(Type.String({ description: "Pi session file to spawn with --session" })),
+	name: Type.Optional(
+		Type.String({ description: "Display name when spawning from a session path" }),
+	),
+	agent: Type.Optional(
+		Type.String({ description: "Agent definition to use when spawning from a session path" }),
+	),
+	prompt: Type.Optional(
+		Type.String({ description: "Optional instruction to send after resuming" }),
+	),
+	interactive: Type.Optional(
+		Type.Boolean({ description: "Whether the resumed agent is interactive" }),
+	),
 });
 
 // ── Launch ──────────────────────────────────────────────────────────────
@@ -519,9 +604,112 @@ interface RunningSubagent {
 	artifactScratchpadId?: number;
 	wakeBody: string;
 	wakeAlreadyDue: boolean;
+	childSessionFile?: string;
+	launchArgs: string[];
 }
 
+const SUBAGENT_STATE_ENTRY = "pi-solo-subagent";
+const SCRATCHPAD_PLACEHOLDER_MARKER = "Reserved by pi-solo subagent orchestration";
+
+interface PersistedSubagentState extends RunningSubagent {
+	version: 1;
+	updatedAt: string;
+}
+
+type SubagentStateEntryData =
+	| { version: 1; event: "upsert"; subagent: PersistedSubagentState; updatedAt: string }
+	| { version: 1; event: "complete"; id?: string; processId?: number; completedAt: string };
+
 const runningSubagents = new Map<string, RunningSubagent>();
+
+function toPersistedSubagent(running: RunningSubagent): PersistedSubagentState {
+	return { ...running, version: 1, updatedAt: new Date().toISOString() };
+}
+
+function normalizePersistedSubagent(value: any): PersistedSubagentState | null {
+	if (!value || typeof value !== "object") return null;
+	if (typeof value.id !== "string" || typeof value.name !== "string") return null;
+	if (typeof value.task !== "string" || typeof value.processId !== "number") return null;
+	return {
+		version: 1,
+		id: value.id,
+		name: value.name,
+		task: value.task,
+		agent: typeof value.agent === "string" ? value.agent : undefined,
+		processId: value.processId,
+		timerId: typeof value.timerId === "number" ? value.timerId : undefined,
+		startTime: typeof value.startTime === "number" ? value.startTime : Date.now(),
+		interactive: value.interactive === true,
+		runtimeState: typeof value.runtimeState === "string" ? value.runtimeState : undefined,
+		artifactScratchpadName:
+			typeof value.artifactScratchpadName === "string" ? value.artifactScratchpadName : undefined,
+		artifactScratchpadId:
+			typeof value.artifactScratchpadId === "number" ? value.artifactScratchpadId : undefined,
+		wakeBody: typeof value.wakeBody === "string" ? value.wakeBody : "",
+		wakeAlreadyDue: value.wakeAlreadyDue === true,
+		childSessionFile:
+			typeof value.childSessionFile === "string" ? value.childSessionFile : undefined,
+		launchArgs: Array.isArray(value.launchArgs)
+			? value.launchArgs.filter((arg: unknown) => typeof arg === "string")
+			: [],
+		updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
+	};
+}
+
+function runningFromPersisted(state: PersistedSubagentState): RunningSubagent {
+	const { version: _version, updatedAt: _updatedAt, ...running } = state;
+	return running;
+}
+
+function reconstructPersistedSubagents(
+	entries: readonly any[],
+): Map<string, PersistedSubagentState> {
+	const restored = new Map<string, PersistedSubagentState>();
+	for (const entry of entries) {
+		if (entry?.type !== "custom" || entry.customType !== SUBAGENT_STATE_ENTRY) continue;
+		const data = entry.data as SubagentStateEntryData | undefined;
+		if (data?.version !== 1) continue;
+		if (data.event === "upsert") {
+			const state = normalizePersistedSubagent(data.subagent);
+			if (state) restored.set(state.id, state);
+			continue;
+		}
+		if (data.event === "complete") {
+			if (typeof data.id === "string") {
+				restored.delete(data.id);
+				continue;
+			}
+			if (typeof data.processId === "number") {
+				for (const [id, state] of restored) {
+					if (state.processId === data.processId) restored.delete(id);
+				}
+			}
+		}
+	}
+	return restored;
+}
+
+function persistRunningSubagent(pi: ExtensionAPI, running: RunningSubagent): void {
+	pi.appendEntry<SubagentStateEntryData>(SUBAGENT_STATE_ENTRY, {
+		version: 1,
+		event: "upsert",
+		subagent: toPersistedSubagent(running),
+		updatedAt: new Date().toISOString(),
+	});
+}
+
+function persistSubagentComplete(
+	pi: ExtensionAPI,
+	params: { id?: string; processId?: number },
+): void {
+	pi.appendEntry<SubagentStateEntryData>(SUBAGENT_STATE_ENTRY, {
+		version: 1,
+		event: "complete",
+		id: params.id,
+		processId: params.processId,
+		completedAt: new Date().toISOString(),
+	});
+}
 
 function formatElapsed(seconds: number): string {
 	if (seconds < 60) return `${seconds}s`;
@@ -542,11 +730,16 @@ function buildRoleBlock(agentDefs: AgentDefaults | null, systemPrompt?: string):
 async function launchSubagent(
 	client: SoloMcpLike,
 	params: Static<typeof SubagentParams>,
+	ctx: ExtensionContext,
 ): Promise<RunningSubagent> {
 	const startTime = Date.now();
 	const id = Math.random().toString(16).slice(2, 10);
 	const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
 	const interactive = resolveEffectiveInteractive(params, agentDefs);
+	const childSessionFile = params.resumeSession?.trim()
+		? resolveSessionPathForLaunch(params.resumeSession, ctx.cwd)
+		: buildChildSessionFile(ctx.sessionManager.getSessionDir(), params.name);
+	const launchArgs = buildSubagentLaunchArgs(agentDefs, childSessionFile);
 
 	let artifact: CreatedScratchpad | null = null;
 	if (wantsScratchpad(params, agentDefs)) {
@@ -561,7 +754,7 @@ async function launchSubagent(
 	const agentToolId = await resolvePiAgentToolId(client);
 	const tagged = labelForSurface(params.name, params.agent);
 	const surface = await createAgentSurface(client, tagged, agentToolId, {
-		extraArgs: buildPiExtraArgs(agentDefs),
+		extraArgs: launchArgs,
 	});
 	await renameSurface(client, surface.processId, tagged);
 	await waitForAgentReady(client, surface.processId);
@@ -593,7 +786,7 @@ async function launchSubagent(
 	}
 
 	const becameBusy = await waitForAgentBusy(client, surface.processId);
-	let wake: { timerId?: number } = { timerId: undefined };
+	let wake: { timerId?: number; alreadySatisfied?: boolean } = { timerId: undefined };
 	try {
 		if (becameBusy) {
 			wake = await scheduleIdleWake(client, surface.processId, DEFAULT_MAX_WAIT_MS, wakeBody);
@@ -616,10 +809,239 @@ async function launchSubagent(
 		artifactScratchpadName: artifact?.name,
 		artifactScratchpadId: artifact?.scratchpadId,
 		wakeBody,
-		wakeAlreadyDue: !becameBusy,
+		wakeAlreadyDue: !becameBusy || wake.alreadySatisfied === true,
+		childSessionFile,
+		launchArgs,
 	};
 	runningSubagents.set(id, running);
 	return running;
+}
+
+async function armWakeForRunning(client: SoloMcpLike, running: RunningSubagent): Promise<void> {
+	if (running.timerId != null) {
+		try {
+			await client.callTool("timer_cancel", { timer_id: running.timerId });
+		} catch {
+			// Best-effort duplicate prevention; the previous timer may already have fired
+			// or may have been owned by the parent process before a restart.
+		}
+	}
+	const wake = await scheduleIdleWake(
+		client,
+		running.processId,
+		DEFAULT_MAX_WAIT_MS,
+		running.wakeBody,
+	);
+	running.timerId = wake.timerId;
+	running.wakeAlreadyDue = wake.alreadySatisfied;
+}
+
+async function emitSubagentResult(
+	pi: ExtensionAPI,
+	params: {
+		kind: "done" | "interactive-ready";
+		processId: number;
+		name: string;
+		agent?: string;
+		scratchpadId?: number;
+		scratchpadName?: string;
+		id?: string;
+	},
+): Promise<void> {
+	if (params.id) runningSubagents.delete(params.id);
+	persistSubagentComplete(pi, { id: params.id, processId: params.processId });
+
+	const llmBody = buildShortWakeBody({
+		kind: params.kind,
+		processId: params.processId,
+		name: params.name,
+		agent: params.agent,
+		scratchpadId: params.scratchpadId,
+		scratchpadName: params.scratchpadName,
+	});
+
+	await pi.sendMessage(
+		{
+			customType: "subagent_result",
+			content: llmBody,
+			display: true,
+			details: {
+				kind: params.kind,
+				name: params.name,
+				agent: params.agent,
+				processId: params.processId,
+				scratchpadId: params.scratchpadId,
+				scratchpadName: params.scratchpadName,
+			},
+		},
+		{ triggerTurn: true },
+	);
+}
+
+function extractedScratchpadContent(result: {
+	structuredContent?: unknown;
+	content?: Array<{ type: string; text?: string }>;
+}): string | undefined {
+	const data = extractToolJson<any>(result);
+	const content = data?.scratchpad?.content ?? data?.content;
+	if (typeof content === "string") return content;
+	return result.content?.find((item) => item.type === "text" && item.text)?.text;
+}
+
+async function scratchpadHasArtifact(client: SoloMcpLike, scratchpadId: number): Promise<boolean> {
+	try {
+		const result = await client.callTool("scratchpad_read", {
+			scratchpad_id: scratchpadId,
+			mode: "full",
+		});
+		if (result.isError) return false;
+		const content = extractedScratchpadContent(result);
+		return Boolean(content?.trim() && !content.includes(SCRATCHPAD_PLACEHOLDER_MARKER));
+	} catch {
+		return false;
+	}
+}
+
+async function respawnSubagentFromState(
+	client: SoloMcpLike,
+	state: PersistedSubagentState,
+	resumePrompt?: string,
+): Promise<RunningSubagent> {
+	const agentToolId = await resolvePiAgentToolId(client);
+	const tagged = labelForSurface(state.name, state.agent);
+	const launchArgs = state.launchArgs.length
+		? state.launchArgs
+		: buildSubagentLaunchArgs(
+				state.agent ? loadAgentDefaults(state.agent) : null,
+				state.childSessionFile,
+			);
+	const surface = await createAgentSurface(client, tagged, agentToolId, { extraArgs: launchArgs });
+	await renameSurface(client, surface.processId, tagged);
+	await waitForAgentReady(client, surface.processId);
+
+	const running: RunningSubagent = {
+		...runningFromPersisted(state),
+		processId: surface.processId,
+		timerId: undefined,
+		startTime: Date.now(),
+		runtimeState: "active",
+		wakeAlreadyDue: false,
+		launchArgs,
+	};
+	running.wakeBody = buildWakeBody({
+		subagentName: running.name,
+		agent: running.agent,
+		processId: running.processId,
+		scratchpadName: running.artifactScratchpadName,
+		scratchpadId: running.artifactScratchpadId,
+		interactive: running.interactive,
+		maxWaitMs: DEFAULT_MAX_WAIT_MS,
+	});
+
+	await sendCommand(
+		client,
+		running.processId,
+		buildResumePrompt({
+			name: running.name,
+			task: running.task,
+			artifactScratchpadName: running.artifactScratchpadName,
+			artifactScratchpadId: running.artifactScratchpadId,
+			prompt: resumePrompt,
+		}),
+	);
+
+	const becameBusy = await waitForAgentBusy(client, running.processId);
+	if (becameBusy) await armWakeForRunning(client, running);
+	else running.wakeAlreadyDue = true;
+	runningSubagents.set(running.id, running);
+	return running;
+}
+
+async function restorePersistedSubagent(
+	pi: ExtensionAPI,
+	client: SoloMcpLike,
+	state: PersistedSubagentState,
+): Promise<void> {
+	if (runningSubagents.has(state.id)) return;
+
+	const status = await getAgentProcessState(client, state.processId);
+	if (status.exists && status.state !== "stopped") {
+		const running = runningFromPersisted(state);
+		running.runtimeState = status.state;
+		runningSubagents.set(running.id, running);
+		if (status.state === "idle") {
+			await emitSubagentResult(pi, {
+				kind: running.interactive ? "interactive-ready" : "done",
+				processId: running.processId,
+				name: running.name,
+				agent: running.agent,
+				scratchpadId: running.artifactScratchpadId,
+				scratchpadName: running.artifactScratchpadName,
+				id: running.id,
+			});
+			return;
+		}
+		await armWakeForRunning(client, running);
+		persistRunningSubagent(pi, running);
+		if (running.wakeAlreadyDue) {
+			await emitSubagentResult(pi, {
+				kind: running.interactive ? "interactive-ready" : "done",
+				processId: running.processId,
+				name: running.name,
+				agent: running.agent,
+				scratchpadId: running.artifactScratchpadId,
+				scratchpadName: running.artifactScratchpadName,
+				id: running.id,
+			});
+		}
+		return;
+	}
+
+	if (
+		state.artifactScratchpadId != null &&
+		(await scratchpadHasArtifact(client, state.artifactScratchpadId))
+	) {
+		await emitSubagentResult(pi, {
+			kind: state.interactive ? "interactive-ready" : "done",
+			processId: state.processId,
+			name: state.name,
+			agent: state.agent,
+			scratchpadId: state.artifactScratchpadId,
+			scratchpadName: state.artifactScratchpadName,
+			id: state.id,
+		});
+		return;
+	}
+
+	const running = await respawnSubagentFromState(client, state);
+	persistRunningSubagent(pi, running);
+	if (running.wakeAlreadyDue) {
+		await emitSubagentResult(pi, {
+			kind: running.interactive ? "interactive-ready" : "done",
+			processId: running.processId,
+			name: running.name,
+			agent: running.agent,
+			scratchpadId: running.artifactScratchpadId,
+			scratchpadName: running.artifactScratchpadName,
+			id: running.id,
+		});
+	}
+}
+
+async function restorePersistedSubagents(
+	pi: ExtensionAPI,
+	client: SoloMcpLike,
+	ctx: ExtensionContext,
+): Promise<void> {
+	const states = reconstructPersistedSubagents(ctx.sessionManager.getBranch());
+	for (const state of states.values()) {
+		try {
+			await restorePersistedSubagent(pi, client, state);
+		} catch {
+			// Resume is best-effort. The persisted entry remains, so the user can
+			// retry with /solo-subagent-resume once Solo/MCP is available again.
+		}
+	}
 }
 
 function resolveInterruptTarget(params: {
@@ -640,6 +1062,81 @@ function resolveInterruptTarget(params: {
 	return { error: `Ambiguous subagent name "${requestedName}". Matches: ${candidates}` };
 }
 
+function findPersistedSubagent(
+	states: Map<string, PersistedSubagentState>,
+	params: Static<typeof SubagentResumeParams>,
+	cwd = process.cwd(),
+): PersistedSubagentState | undefined {
+	if (params.id?.trim()) return states.get(params.id.trim());
+	const sessionPath = params.session?.trim()
+		? resolveSessionPathForLaunch(params.session, cwd)
+		: undefined;
+	for (const running of runningSubagents.values()) {
+		if (params.processId != null && running.processId === params.processId) {
+			return toPersistedSubagent(running);
+		}
+		if (sessionPath && running.childSessionFile === sessionPath) {
+			return toPersistedSubagent(running);
+		}
+	}
+	for (const state of states.values()) {
+		if (params.processId != null && state.processId === params.processId) return state;
+		if (sessionPath && state.childSessionFile === sessionPath) return state;
+	}
+	return undefined;
+}
+
+async function spawnSubagentFromSession(
+	client: SoloMcpLike,
+	ctx: ExtensionContext,
+	params: Static<typeof SubagentResumeParams>,
+): Promise<RunningSubagent> {
+	if (!params.session?.trim()) throw new Error("Provide a session path to spawn from.");
+	const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+	const childSessionFile = resolveSessionPathForLaunch(params.session, ctx.cwd);
+	const name =
+		params.name?.trim() || safeSlug(childSessionFile.split("/").pop() ?? "session", "session");
+	const launchArgs = buildSubagentLaunchArgs(agentDefs, childSessionFile);
+	const agentToolId = await resolvePiAgentToolId(client);
+	const tagged = labelForSurface(name, params.agent);
+	const surface = await createAgentSurface(client, tagged, agentToolId, { extraArgs: launchArgs });
+	await renameSurface(client, surface.processId, tagged);
+	await waitForAgentReady(client, surface.processId);
+
+	const running: RunningSubagent = {
+		id: Math.random().toString(16).slice(2, 10),
+		name,
+		task: params.prompt?.trim() || "Resume the existing Pi session.",
+		agent: params.agent,
+		processId: surface.processId,
+		startTime: Date.now(),
+		interactive: params.interactive === true,
+		runtimeState: "active",
+		wakeBody: "",
+		wakeAlreadyDue: false,
+		childSessionFile,
+		launchArgs,
+	};
+	running.wakeBody = buildWakeBody({
+		subagentName: running.name,
+		agent: running.agent,
+		processId: running.processId,
+		interactive: running.interactive,
+		maxWaitMs: DEFAULT_MAX_WAIT_MS,
+	});
+
+	await sendCommand(
+		client,
+		running.processId,
+		buildResumePrompt({ name: running.name, task: running.task, prompt: params.prompt }),
+	);
+	const becameBusy = await waitForAgentBusy(client, running.processId);
+	if (becameBusy) await armWakeForRunning(client, running);
+	else running.wakeAlreadyDue = true;
+	runningSubagents.set(running.id, running);
+	return running;
+}
+
 function muxUnavailableResult(reason: string) {
 	return {
 		content: [{ type: "text" as const, text: reason }],
@@ -655,6 +1152,11 @@ export interface SoloSubagentDeps {
 }
 
 export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
+	pi.on("session_start", async (_event, ctx) => {
+		if (!deps.isClientReady()) return;
+		await restorePersistedSubagents(pi, deps.client, ctx);
+	});
+
 	pi.on("session_shutdown", () => {
 		runningSubagents.clear();
 	});
@@ -674,41 +1176,16 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 			}
 		}
 
-		const displayName = running?.name ?? marker.name ?? `Solo #${marker.processId}`;
-		const agentName = running?.agent ?? marker.agent;
-		const scratchpadId = marker.scratchpadId ?? running?.artifactScratchpadId;
-		const scratchpadName = running?.artifactScratchpadName;
-
-		const llmBody = buildShortWakeBody({
-			kind: marker.kind,
-			processId: marker.processId,
-			name: displayName,
-			agent: agentName,
-			scratchpadId,
-			scratchpadName,
-		});
-
-		// Inject as a typed custom message so the registered `subagent_result`
-		// renderer takes over the UI presentation. If sendMessage fails for any
-		// reason, fall back to letting the original input through so the wake
-		// is never silently dropped.
 		try {
-			await pi.sendMessage(
-				{
-					customType: "subagent_result",
-					content: llmBody,
-					display: true,
-					details: {
-						kind: marker.kind,
-						name: displayName,
-						agent: agentName,
-						processId: marker.processId,
-						scratchpadId,
-						scratchpadName,
-					},
-				},
-				{ triggerTurn: true },
-			);
+			await emitSubagentResult(pi, {
+				kind: marker.kind,
+				processId: marker.processId,
+				name: running?.name ?? marker.name ?? `Solo #${marker.processId}`,
+				agent: running?.agent ?? marker.agent,
+				scratchpadId: marker.scratchpadId ?? running?.artifactScratchpadId,
+				scratchpadName: running?.artifactScratchpadName,
+				id: running?.id,
+			});
 			return { action: "handled" };
 		} catch {
 			return { action: "continue" };
@@ -728,14 +1205,15 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 			"Spawn a Solo-native sub-agent. Fire-and-forget; Solo wakes the parent when the child goes idle. Artifacts go to Solo scratchpads.",
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!deps.isClientReady()) {
 				return muxUnavailableResult(
 					"Solo MCP not ready — make sure Solo is running and MCP is enabled (Settings → MCP).",
 				);
 			}
 
-			const running = await launchSubagent(deps.client, params);
+			const running = await launchSubagent(deps.client, params, ctx);
+			persistRunningSubagent(pi, running);
 			const artifactText = running.artifactScratchpadName
 				? `Artifact scratchpad: "${running.artifactScratchpadName}"${running.artifactScratchpadId != null ? ` (id ${running.artifactScratchpadId})` : ""}. `
 				: "";
@@ -758,6 +1236,7 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 					timerId: running.timerId,
 					artifactScratchpadName: running.artifactScratchpadName,
 					artifactScratchpadId: running.artifactScratchpadId,
+					childSessionFile: running.childSessionFile,
 					wakeAlreadyDue: running.wakeAlreadyDue,
 					status: "started",
 				},
@@ -805,6 +1284,92 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 			}
 			const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
 			return new Text(theme.fg("dim", text), 0, 0);
+		},
+	});
+
+	// ── subagent_resume ──
+	pi.registerTool({
+		name: "subagent_resume",
+		label: "Resume Solo Subagent",
+		description:
+			"Resume a Solo subagent by pi-solo id, Solo process id, or Pi session file. " +
+			"If the old Solo pane still exists, pi-solo re-attaches and re-arms the idle watcher. " +
+			"If it is gone, pi-solo respawns Pi with the saved --session args and sends a resume prompt.",
+		promptSnippet:
+			"Resume a previously launched Solo subagent, preserving its Pi session and artifact scratchpad.",
+		parameters: SubagentResumeParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!deps.isClientReady()) {
+				return muxUnavailableResult(
+					"Solo MCP not ready — make sure Solo is running and MCP is enabled (Settings → MCP).",
+				);
+			}
+
+			const states = reconstructPersistedSubagents(ctx.sessionManager.getBranch());
+			const persisted = findPersistedSubagent(states, params, ctx.cwd);
+			let running: RunningSubagent;
+
+			if (persisted) {
+				const live = runningSubagents.get(persisted.id);
+				const candidate = live ?? runningFromPersisted(persisted);
+				const status = await getAgentProcessState(deps.client, candidate.processId);
+				if (status.exists && status.state !== "stopped") {
+					running = candidate;
+					running.runtimeState = status.state;
+					runningSubagents.set(running.id, running);
+					if (params.prompt?.trim()) {
+						await sendCommand(deps.client, running.processId, params.prompt.trim());
+						const becameBusy = await waitForAgentBusy(deps.client, running.processId);
+						if (becameBusy) await armWakeForRunning(deps.client, running);
+						else running.wakeAlreadyDue = true;
+					} else if (status.state === "idle") {
+						running.wakeAlreadyDue = true;
+					} else {
+						await armWakeForRunning(deps.client, running);
+					}
+				} else {
+					running = await respawnSubagentFromState(deps.client, persisted, params.prompt);
+				}
+			} else if (params.session?.trim()) {
+				running = await spawnSubagentFromSession(deps.client, ctx, params);
+			} else {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "No matching subagent found. Provide id, processId, or session.",
+						},
+					],
+					details: { error: "not_found" },
+				};
+			}
+
+			persistRunningSubagent(pi, running);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							`Sub-agent "${running.name}" resumed in Solo agent pane #${running.processId}. ` +
+							(running.childSessionFile ? `Pi session: ${running.childSessionFile}. ` : "") +
+							(running.wakeAlreadyDue
+								? `It is idle now. Treat this as the wake-up body:\n\n${running.wakeBody}`
+								: "Solo will wake the parent when it goes idle."),
+					},
+				],
+				details: {
+					id: running.id,
+					name: running.name,
+					agent: running.agent,
+					processId: running.processId,
+					timerId: running.timerId,
+					childSessionFile: running.childSessionFile,
+					artifactScratchpadName: running.artifactScratchpadName,
+					artifactScratchpadId: running.artifactScratchpadId,
+					wakeAlreadyDue: running.wakeAlreadyDue,
+					status: "resumed",
+				},
+			};
 		},
 	});
 
@@ -911,6 +1476,29 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		},
 	});
 
+	pi.registerCommand("solo-subagent-resume", {
+		description: "Resume a Solo subagent: /solo-subagent-resume <id|process-id|session> [prompt]",
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				ctx.ui.notify("Usage: /solo-subagent-resume <id|process-id|session> [prompt]", "warning");
+				return;
+			}
+			const spaceIdx = trimmed.indexOf(" ");
+			const target = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+			const prompt = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
+			const key = /^\d+$/.test(target)
+				? "processId"
+				: target.includes("/") || target.endsWith(".jsonl")
+					? "session"
+					: "id";
+			const value = key === "processId" ? Number(target) : target;
+			pi.sendUserMessage(
+				`Use subagent_resume with ${key}: ${JSON.stringify(value)}${prompt ? ` and prompt: ${JSON.stringify(prompt)}` : ""}`,
+			);
+		},
+	});
+
 	pi.registerMessageRenderer("subagent_result", (message, _options, theme) => {
 		const details = message.details as any;
 		if (!details) return undefined;
@@ -948,7 +1536,10 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 // Exported for tests
 export const __test__ = {
 	buildArtifactScratchpadName,
+	buildChildSessionFile,
+	buildResumePrompt,
 	buildShortWakeBody,
+	buildSubagentLaunchArgs,
 	buildWakeBody,
 	buildWrappedTask,
 	discoverAgentDefinitions,
@@ -959,8 +1550,11 @@ export const __test__ = {
 	parseAgentDefinition,
 	parseModelSpec,
 	parseWakeMarker,
+	reconstructPersistedSubagents,
 	resolveEffectiveInteractive,
 	resolveInterruptTarget,
+	resolveSessionPathForLaunch,
 	runningSubagents,
+	toPersistedSubagent,
 	wantsScratchpad,
 };

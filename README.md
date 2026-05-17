@@ -9,7 +9,7 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 - Auto-detects Solo's bundled MCP helper at `/Applications/Solo.app/Contents/MacOS/mcp`.
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
 - Queries Solo for its full tool catalog and exposes a curated tool surface. By default, only the handoff/workflow essentials (`scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, `todo_complete`) are **first-class Pi tools**; lower-frequency cleanup/admin tools stay discoverable and callable through `solo_tool`.
-- **Solo-native subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes via Solo's native `spawn_agent` MCP tool — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Agent frontmatter `model` and `thinking` are forwarded as per-launch Pi `extra_args`, so the child starts on the right model/thinking without any post-boot self-mutation. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
+- **Solo-native, resumable subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes via Solo's native `spawn_agent` MCP tool — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Agent frontmatter `model` and `thinking` are forwarded as per-launch Pi `extra_args`, and every child gets a dedicated Pi `--session` JSONL file, so pi-solo can re-attach or respawn it after the parent restarts. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
 - **Auto-binds to `SOLO_PROCESS_ID`** via Solo's canonical `identify_session` tool when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
 - **Idle-closes the helper** after 5 s of inactivity so it doesn't show up as a persistent subprocess under your Pi row in Solo's sidebar. Bursts of MCP calls reuse one warm helper; quiet periods cost zero subprocesses.
 - **Renders keyboard shortcuts** on spawn/start/restart/status results so you can press `⌥3 · ⌘5` (or whatever the position resolves to) to jump straight to the relevant agent in Solo's sidebar.
@@ -68,14 +68,15 @@ The status dot reflects the SoloMcpClient state — green when connected, yellow
 
 ## Commands
 
-| Command                        | Purpose                                                                        |
-| ------------------------------ | ------------------------------------------------------------------------------ |
-| `/solo`                        | Show connection status, catalog/direct/gateway counts, bound project & process |
-| `/solo-tools`                  | List Solo MCP catalog tools and whether they are direct or gateway-only        |
-| `/solo-refresh`                | Re-query Solo for its current tool catalog (cheap)                             |
-| `/solo-reconnect`              | Force-restart the helper                                                       |
-| `/solo-bind <process-id>`      | Manually bind this Pi to a Solo process                                        |
-| `/solo-subagent <name> [task]` | Spawn a Solo subagent by agent name (scout, worker, …)                         |
+| Command                                                    | Purpose                                                                        |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `/solo`                                                    | Show connection status, catalog/direct/gateway counts, bound project & process |
+| `/solo-tools`                                              | List Solo MCP catalog tools and whether they are direct or gateway-only        |
+| `/solo-refresh`                                            | Re-query Solo for its current tool catalog (cheap)                             |
+| `/solo-reconnect`                                          | Force-restart the helper                                                       |
+| `/solo-bind <process-id>`                                  | Manually bind this Pi to a Solo process                                        |
+| `/solo-subagent <name> [task]`                             | Spawn a Solo subagent by agent name (scout, worker, …)                         |
+| `/solo-subagent-resume <id\|process-id\|session> [prompt]` | Resume/re-attach a subagent or respawn Pi with an existing `--session` file    |
 
 ## Solo subagents
 
@@ -87,6 +88,7 @@ Solo subagents lean into Solo's own primitives. Subagents are spawned with Solo'
 | -------------------- | -------------------------------------------------------------------------------------- |
 | `solo_tool`          | List, inspect, or call Solo MCP catalog tools that are hidden from the direct surface. |
 | `subagent`           | Spawn a sub-agent in a Solo agent pane. Fire-and-forget; parent wakes on idle.         |
+| `subagent_resume`    | Re-attach to a live subagent or respawn Pi with a saved child `--session` file.        |
 | `subagent_interrupt` | Send Escape to interrupt the active turn (pane stays alive).                           |
 | `subagents_list`     | List available agent definitions from `~/.pi/agent/agents/` and `.pi/agents/`.         |
 
@@ -110,10 +112,11 @@ You are a codebase reconnaissance specialist. …
 Whenever a subagent produces an artifact (plan, spec, scout report, review notes), it lands in a **Solo scratchpad** rather than a local file:
 
 1. The orchestrator pre-creates an empty scratchpad named `<agent>/<timestamp>-<task-slug>`.
-2. The first prompt tells the subagent the scratchpad name, id, and placeholder revision so it can overwrite the artifact via `scratchpad_write`.
+2. The child is launched with a dedicated Pi `--session <jsonl>` file and the first prompt tells it the scratchpad name, id, and placeholder revision so it can overwrite the artifact via `scratchpad_write`.
 3. The Solo idle timer injects a wake-up body into the parent with the process id and scratchpad id so the parent can read it directly with `scratchpad_read`.
+4. The parent persists the child session path, process id, timer id, and artifact references in the parent Pi session. On restart, pi-solo validates the old Solo process; if it is still alive, it re-arms the idle watcher, and if it is gone, it respawns Pi with the same child `--session` file and sends a resume prompt.
 
-This happens by default for every subagent. Set `output: false` in the agent definition or pass `scratchpad: false` to opt out.
+This happens by default for every subagent. Set `output: false` in the agent definition or pass `scratchpad: false` to opt out of the scratchpad artifact; the child Pi session still exists for resumption.
 
 ### Solo MCP tool surface
 
@@ -172,7 +175,7 @@ When Pi is launched as a Solo agent (Solo sets `SOLO_PROCESS_ID` in the environm
 
 ### Subagent wake-up
 
-`subagent` launches the configured Pi agent tool through Solo's native `spawn_agent`, forwarding any `model` / `thinking` from the agent definition as `extra_args` (`--model …`, `--thinking …`). It then waits until Solo reports `agent_state.idle`, schedules `timer_fire_when_idle_any`, and sends the wrapped task as one user turn. When the child later goes idle (or reaches the 30 minute max wait), Solo injects a plain wake-up body into the parent Pi process with the child `process_id` and scratchpad id. The parent reads the scratchpad and closes the child pane when finished.
+`subagent` launches the configured Pi agent tool through Solo's native `spawn_agent`, forwarding any `model` / `thinking` from the agent definition plus a child Pi session file as `extra_args` (`--model …`, `--thinking …`, `--session …`). It then waits until Solo reports `agent_state.idle`, schedules `timer_fire_when_idle_any`, and sends the wrapped task as one user turn. When the child later goes idle (or reaches the 30 minute max wait), Solo injects a plain wake-up body into the parent Pi process with the child `process_id` and scratchpad id. The parent records the subagent complete in its session state, reads the scratchpad, and closes the child pane when finished.
 
 ### Keyboard hints
 

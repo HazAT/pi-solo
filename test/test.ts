@@ -394,6 +394,7 @@ import {
 } from "../pi-extension/solo/subagents/index.ts";
 import {
 	createAgentSurface,
+	getAgentProcessState,
 	resetResolvedPiAgentToolIdForTests,
 	resolvePiAgentToolId,
 	scheduleIdleWake,
@@ -875,6 +876,114 @@ test("buildPiExtraArgs — passes only --thinking when model is absent", () => {
 
 test("buildPiExtraArgs — ignores invalid thinking level", () => {
 	assert.deepEqual(buildPiExtraArgs({ thinking: "extreme" }), []);
+});
+
+test("buildSubagentLaunchArgs — appends --session after model args", () => {
+	assert.deepEqual(
+		subagents.buildSubagentLaunchArgs(
+			{ model: "anthropic/claude-haiku-4-5", thinking: "low" },
+			"/tmp/child.jsonl",
+		),
+		["--model", "anthropic/claude-haiku-4-5", "--thinking", "low", "--session", "/tmp/child.jsonl"],
+	);
+});
+
+test("buildChildSessionFile — creates a jsonl path in the parent session dir", () => {
+	const path = subagents.buildChildSessionFile("/tmp/pi-sessions", "Scout: Auth Module")!;
+	assert.match(path, /^\/tmp\/pi-sessions\//);
+	assert.match(path, /scout-auth-module/);
+	assert.match(path, /\.jsonl$/);
+});
+
+test("resolveSessionPathForLaunch — expands relative paths against cwd", () => {
+	assert.equal(
+		subagents.resolveSessionPathForLaunch("sessions/child.jsonl", "/Users/example/project"),
+		"/Users/example/project/sessions/child.jsonl",
+	);
+});
+
+test("buildResumePrompt — references existing session context and scratchpad", () => {
+	const prompt = subagents.buildResumePrompt({
+		name: "Worker",
+		task: "Do work",
+		artifactScratchpadName: "worker/result",
+		artifactScratchpadId: 42,
+		prompt: "continue",
+	});
+	assert.match(prompt, /same Pi --session file/);
+	assert.match(prompt, /worker\/result/);
+	assert.match(prompt, /Original task:\nDo work/);
+	assert.match(prompt, /Additional resume instruction:\ncontinue/);
+});
+
+test("reconstructPersistedSubagents — applies upsert and complete events", () => {
+	const running = {
+		id: "abc123",
+		name: "Scout",
+		task: "scan",
+		processId: 9,
+		startTime: 1,
+		interactive: false,
+		wakeBody: "wake",
+		wakeAlreadyDue: false,
+		launchArgs: ["--session", "/tmp/child.jsonl"],
+	};
+	const persisted = subagents.toPersistedSubagent(running);
+	const restored = subagents.reconstructPersistedSubagents([
+		{
+			type: "custom",
+			customType: "pi-solo-subagent",
+			data: { version: 1, event: "upsert", subagent: persisted, updatedAt: "now" },
+		},
+		{ type: "custom", customType: "other", data: {} },
+	]);
+	assert.equal(restored.get("abc123")?.processId, 9);
+
+	const completed = subagents.reconstructPersistedSubagents([
+		{
+			type: "custom",
+			customType: "pi-solo-subagent",
+			data: { version: 1, event: "upsert", subagent: persisted, updatedAt: "now" },
+		},
+		{
+			type: "custom",
+			customType: "pi-solo-subagent",
+			data: { version: 1, event: "complete", id: "abc123", completedAt: "later" },
+		},
+	]);
+	assert.equal(completed.size, 0);
+});
+
+test("getAgentProcessState — maps active, idle, and error states", async () => {
+	assert.deepEqual(
+		await getAgentProcessState(
+			mockClient({
+				get_process_status: structured({ status: "running", agent_state: { thinking: true } }),
+			}),
+			1,
+		),
+		{ exists: true, state: "active", status: "running" },
+	);
+	assert.deepEqual(
+		await getAgentProcessState(
+			mockClient({
+				get_process_status: structured({ status: "running", agent_state: { idle: true } }),
+			}),
+			2,
+		),
+		{ exists: true, state: "idle", status: "running" },
+	);
+	assert.equal(
+		(
+			await getAgentProcessState(
+				mockClient({
+					get_process_status: { isError: true, content: [{ type: "text", text: "missing" }] },
+				}),
+				3,
+			)
+		).exists,
+		false,
+	);
 });
 
 test("createAgentSurface — calls spawn_agent with agent_tool_id and name", async () => {

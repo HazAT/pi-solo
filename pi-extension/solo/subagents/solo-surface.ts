@@ -143,18 +143,40 @@ export async function closeSurface(client: SoloMcpLike, processId: number): Prom
  * This is the source of truth for v2; terminals do not populate it.
  */
 export async function getRuntimeState(client: SoloMcpLike, processId: number): Promise<string> {
+	return (await getAgentProcessState(client, processId)).state;
+}
+
+export interface AgentProcessState {
+	exists: boolean;
+	state: "active" | "idle" | "stopped" | "unknown";
+	status?: string;
+}
+
+/** Query Solo for a process and keep the alive/dead distinction for resume flows. */
+export async function getAgentProcessState(
+	client: SoloMcpLike,
+	processId: number,
+): Promise<AgentProcessState> {
 	try {
 		const result = await client.callTool("get_process_status", { process_id: processId });
+		if (result.isError) return { exists: false, state: "unknown", status: errorText(result) };
+
 		const data = extractJson<any>(result);
 		const state = data?.agent_state;
-		if (state?.thinking || state?.planning) return "active";
-		if (state?.idle === true) return "idle";
-		if (data?.status && String(data.status).toLowerCase() !== "running") {
-			return String(data.status).toLowerCase();
+		if (state?.thinking || state?.planning || state?.idle === false) {
+			return { exists: true, state: "active", status: data?.status };
 		}
-		return "active";
-	} catch {
-		return "unknown";
+		if (state?.idle === true) return { exists: true, state: "idle", status: data?.status };
+
+		const status = typeof data?.status === "string" ? data.status.toLowerCase() : undefined;
+		if (status && status !== "running") return { exists: true, state: "stopped", status };
+		return { exists: true, state: "active", status };
+	} catch (err) {
+		return {
+			exists: false,
+			state: "unknown",
+			status: err instanceof Error ? err.message : String(err),
+		};
 	}
 }
 
