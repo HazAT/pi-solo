@@ -33,6 +33,7 @@ import {
 	isSoloFailureText,
 	SHORTCUT_TOOLS,
 } from "../pi-extension/solo/index.ts";
+import { formatExpandedToolResult, formatExpandedValue } from "../pi-extension/solo/rendering.ts";
 
 // ---------------------------------------------------------------------------
 // Solo tool surface policy
@@ -338,6 +339,25 @@ test("mcpContentToPi — embeds resource uri and text", () => {
 	assert.equal(out.length, 1);
 	assert.match(out[0].text, /file:\/\/\/foo/);
 	assert.match(out[0].text, /body/);
+});
+
+test("formatExpandedValue — pretty-prints JSON-looking strings", () => {
+	assert.equal(formatExpandedValue("input", '{"a":1}'), 'input:\n{\n  "a": 1\n}');
+});
+
+test("formatExpandedToolResult — includes full content and non-duplicated metadata", () => {
+	const text = formatExpandedToolResult({
+		content: [{ type: "text", text: '{"scratchpad_id":7,"revision":2}' }],
+		details: {
+			mcpTool: "scratchpad_write",
+			structuredContent: { scratchpad_id: 7, revision: 2 },
+		},
+	});
+	assert.match(text, /content:/);
+	assert.match(text, /"scratchpad_id": 7/);
+	assert.match(text, /details:/);
+	assert.match(text, /"mcpTool": "scratchpad_write"/);
+	assert.doesNotMatch(text, /structuredContent/);
 });
 
 // ---------------------------------------------------------------------------

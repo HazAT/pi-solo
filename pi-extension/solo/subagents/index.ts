@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { formatExpandedToolResult, formatExpandedValue, styleExpandedBlock } from "../rendering.ts";
 import {
 	type SoloMcpLike,
 	closeSurface,
@@ -30,6 +31,16 @@ import {
 	waitForAgentBusy,
 	waitForAgentReady,
 } from "./solo-surface.ts";
+
+function withExpandedToolResult(
+	summary: string,
+	result: { content?: Array<{ type: string; text?: string }>; details?: unknown },
+	expanded: boolean | undefined,
+	theme: any,
+): string {
+	if (!expanded) return summary;
+	return `${summary}\n\n${styleExpandedBlock(formatExpandedToolResult(result), theme)}`;
+}
 
 // ── Agent definitions ────────────────────────────────────────────────────
 
@@ -1243,7 +1254,7 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 			};
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			const partial = args as Record<string, unknown>;
 			const name = typeof partial.name === "string" && partial.name ? partial.name : "(unnamed)";
 			const task = typeof partial.task === "string" ? partial.task : "";
@@ -1253,16 +1264,20 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 					: "";
 			let text = "▸ " + theme.fg("toolTitle", theme.bold(name)) + agent;
 			if (task) {
-				const first = task.split("\n").find((line: string) => line.trim()) ?? "";
-				const preview = first.length > 100 ? first.slice(0, 100) + "…" : first;
-				if (preview) text += "\n" + theme.fg("toolOutput", preview);
-				const lines = task.split("\n").length;
-				if (lines > 1) text += theme.fg("muted", ` (${lines} lines)`);
+				if (context?.expanded) {
+					text = `${text}\n\n${styleExpandedBlock(formatExpandedValue("task", task), theme)}`;
+				} else {
+					const first = task.split("\n").find((line: string) => line.trim()) ?? "";
+					const preview = first.length > 100 ? first.slice(0, 100) + "…" : first;
+					if (preview) text += "\n" + theme.fg("toolOutput", preview);
+					const lines = task.split("\n").length;
+					if (lines > 1) text += theme.fg("muted", ` (${lines} lines)`);
+				}
 			}
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, _opts, theme) {
+		renderResult(result, opts, theme) {
 			const details = result.details as any;
 			const name = details?.name ?? "(unnamed)";
 			if (details?.status === "started") {
@@ -1271,19 +1286,21 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 					: "";
 				const timerTag =
 					details?.timerId != null ? theme.fg("dim", ` · timer #${details.timerId}`) : "";
-				return new Text(
+				const summary =
 					theme.fg("accent", "▸") +
-						" " +
-						theme.fg("toolTitle", theme.bold(name)) +
-						theme.fg("dim", ` — started (Solo #${details.processId})`) +
-						artifactTag +
-						timerTag,
-					0,
-					0,
-				);
+					" " +
+					theme.fg("toolTitle", theme.bold(name)) +
+					theme.fg("dim", ` — started (Solo #${details.processId})`) +
+					artifactTag +
+					timerTag;
+				return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
 			}
 			const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
-			return new Text(theme.fg("dim", text), 0, 0);
+			return new Text(
+				withExpandedToolResult(theme.fg("dim", text), result, opts.expanded, theme),
+				0,
+				0,
+			);
 		},
 	});
 
@@ -1371,6 +1388,38 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 				},
 			};
 		},
+		renderCall(args, theme, context) {
+			const target = args.id ?? args.processId ?? args.session ?? args.name ?? "subagent";
+			let text =
+				theme.fg("accent", "↻") +
+				" " +
+				theme.fg("toolTitle", theme.bold("subagent_resume")) +
+				" " +
+				theme.fg("accent", String(target));
+			if (typeof args.prompt === "string" && args.prompt.trim()) {
+				if (context?.expanded) {
+					text = `${text}\n\n${styleExpandedBlock(formatExpandedValue("prompt", args.prompt), theme)}`;
+				} else {
+					text += "\n" + theme.fg("toolOutput", firstLine(args.prompt, 100));
+				}
+			}
+			return new Text(text, 0, 0);
+		},
+		renderResult(result, opts, theme) {
+			const details = result.details as any;
+			if (details?.error) {
+				const summary = theme.fg("error", `✘ subagent_resume: ${details.error}`);
+				return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
+			}
+			const name = details?.name ?? "subagent";
+			const processId = details?.processId != null ? ` (Solo #${details.processId})` : "";
+			const summary =
+				theme.fg("success", "✓") +
+				" " +
+				theme.fg("toolTitle", theme.bold(name)) +
+				theme.fg("dim", ` — resumed${processId}`);
+			return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
+		},
 	});
 
 	// ── subagent_interrupt ──
@@ -1416,6 +1465,32 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 				};
 			}
 		},
+		renderCall(args, theme) {
+			const target = args.id ?? args.name ?? "subagent";
+			return new Text(
+				theme.fg("accent", "⎋") +
+					" " +
+					theme.fg("toolTitle", theme.bold("subagent_interrupt")) +
+					" " +
+					theme.fg("accent", String(target)),
+				0,
+				0,
+			);
+		},
+		renderResult(result, opts, theme) {
+			const details = result.details as any;
+			if (details?.error) {
+				const summary = theme.fg("error", `✘ subagent_interrupt: ${details.error}`);
+				return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
+			}
+			const name = details?.name ?? "subagent";
+			const summary =
+				theme.fg("success", "✓") +
+				" " +
+				theme.fg("toolTitle", theme.bold(name)) +
+				theme.fg("dim", " — interrupt requested");
+			return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
+		},
 	});
 
 	// ── subagents_list ──
@@ -1444,6 +1519,20 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: { agents: list },
 			};
+		},
+		renderCall(_args, theme) {
+			return new Text(
+				theme.fg("accent", "○") + " " + theme.fg("toolTitle", theme.bold("subagents_list")),
+				0,
+				0,
+			);
+		},
+		renderResult(result, opts, theme) {
+			const details = result.details as any;
+			const agents = Array.isArray(details?.agents) ? details.agents : [];
+			const summary =
+				theme.fg("success", "✓") + " " + theme.fg("dim", `${agents.length} subagents`);
+			return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
 		},
 	});
 
@@ -1499,7 +1588,7 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		},
 	});
 
-	pi.registerMessageRenderer("subagent_result", (message, _options, theme) => {
+	pi.registerMessageRenderer("subagent_result", (message, options, theme) => {
 		const details = message.details as any;
 		if (!details) return undefined;
 
@@ -1529,6 +1618,20 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 		const bgFn = (t: string) => theme.bg("toolSuccessBg", t);
 		const box = new Box(1, 1, bgFn);
 		box.addChild(new Text(headerLine, 0, 0, bgFn));
+		if (options.expanded) {
+			const content =
+				typeof message.content === "string"
+					? [{ type: "text", text: message.content }]
+					: (message.content as any);
+			box.addChild(
+				new Text(
+					"\n" + styleExpandedBlock(formatExpandedToolResult({ content, details }), theme),
+					0,
+					0,
+					bgFn,
+				),
+			);
+		}
 		return box;
 	});
 }

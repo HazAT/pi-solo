@@ -11,7 +11,7 @@
  * or MCP is disabled in Solo settings.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { installSoloHeader, setSoloHeaderStatus } from "./header.ts";
+import { formatExpandedToolResult, formatExpandedValue, styleExpandedBlock } from "./rendering.ts";
 import { initSoloSubagents } from "./subagents/index.ts";
 
 // -------------------------------------------------------------------------
@@ -960,7 +961,7 @@ function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
 				);
 			}
 		},
-		renderCall(args: ToolArgs, theme: any) {
+		renderCall(args: ToolArgs, theme: any, context: any) {
 			const action = typeof args.action === "string" ? args.action : "?";
 			const name = typeof args.name === "string" && args.name ? ` ${args.name}` : "";
 			let text =
@@ -971,20 +972,26 @@ function registerSoloToolGateway(pi: ExtensionAPI, client: SoloMcpClient) {
 			if (typeof args.reason === "string" && args.reason.trim()) {
 				text += theme.fg("dim", ` — ${firstLine(args.reason, 80)}`);
 			}
-			return new Text(text, 0, 0);
+			return new Text(withExpandedValue(text, "input", args, context?.expanded, theme), 0, 0);
 		},
-		renderResult(result: ToolResult, _opts: { isPartial?: boolean }, theme: any) {
-			if (result.isError) {
-				return new Text(
-					theme.fg("error", `✘ solo_tool: ${firstLine(result.content[0]?.text, 120)}`),
-					0,
-					0,
+		renderResult(
+			result: ToolResult,
+			opts: { expanded?: boolean; isPartial?: boolean },
+			theme: any,
+			context: any,
+		) {
+			if (context?.isError || result.isError) {
+				const summary = theme.fg(
+					"error",
+					`✘ solo_tool: ${firstLine(result.content[0]?.text, 120)}`,
 				);
+				return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
 			}
 			const details = result.details as any;
 			const count = Array.isArray(details?.tools) ? ` · ${details.tools.length} tools` : "";
 			const subject = details?.mcpTool ?? details?.action ?? "ok";
-			return new Text(theme.fg("success", "✓") + " " + theme.fg("dim", `${subject}${count}`), 0, 0);
+			const summary = theme.fg("success", "✓") + " " + theme.fg("dim", `${subject}${count}`);
+			return new Text(withExpandedToolResult(summary, result, opts.expanded, theme), 0, 0);
 		},
 	});
 }
@@ -1434,6 +1441,41 @@ export function lineCount(v: unknown): number {
 	return String(v).split("\n").length;
 }
 
+function withExpandHint(text: string, expanded: boolean | undefined, theme: any): string {
+	if (expanded) return text;
+	return `${text}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`;
+}
+
+function withExpandedToolResult(
+	summary: string,
+	result: ToolResult,
+	expanded: boolean | undefined,
+	theme: any,
+): string {
+	const compact = withExpandHint(summary, expanded, theme);
+	if (!expanded) return compact;
+	return `${compact}\n\n${styleExpandedBlock(formatExpandedToolResult(result), theme)}`;
+}
+
+function withExpandedValue(
+	summary: string,
+	label: string,
+	value: unknown,
+	expanded: boolean | undefined,
+	theme: any,
+): string {
+	if (!expanded) return summary;
+	return `${summary}\n\n${styleExpandedBlock(formatExpandedValue(label, value), theme)}`;
+}
+
+function largeTextArg(args: ToolArgs): { label: string; value: string } | undefined {
+	if (typeof args.body === "string" && args.body) return { label: "body", value: args.body };
+	if (typeof args.content === "string" && args.content)
+		return { label: "content", value: args.content };
+	if (typeof args.input === "string" && args.input) return { label: "input", value: args.input };
+	return undefined;
+}
+
 // Best-effort: most Solo MCP tools return one text content item whose body
 // is a JSON string. Parse it and return the structured object.
 function extractJson(result: ToolResult): any | undefined {
@@ -1482,13 +1524,18 @@ export function markerFor(name: string): string {
 }
 
 function makeRenderers(mcpName: string): {
-	renderCall: (args: ToolArgs, theme: any) => Text;
-	renderResult: (result: ToolResult, opts: { isPartial?: boolean }, theme: any) => Text;
+	renderCall: (args: ToolArgs, theme: any, context?: any) => Text;
+	renderResult: (
+		result: ToolResult,
+		opts: { expanded?: boolean; isPartial?: boolean },
+		theme: any,
+		context?: any,
+	) => Text;
 } {
 	const marker = markerFor(mcpName);
 
 	return {
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			const subject = pickSubject(mcpName, args);
 			let text =
 				theme.fg("accent", marker) + " " + theme.fg("toolTitle", theme.bold(`solo ${mcpName}`));
@@ -1520,29 +1567,30 @@ function makeRenderers(mcpName: string): {
 
 			if (hints.length) text += theme.fg("dim", ` (${hints.join(", ")})`);
 
-			// Inline body / content preview (one line)
-			const body =
-				(typeof args.body === "string" && args.body) ||
-				(typeof args.content === "string" && args.content) ||
-				(typeof args.input === "string" && args.input) ||
-				"";
-			if (body) {
-				const preview = firstLine(body, 90);
-				if (preview) text += "\n" + theme.fg("toolOutput", preview);
+			// Inline body / content preview, full in expanded mode.
+			const largeText = largeTextArg(args);
+			if (largeText) {
+				if (context?.expanded) {
+					text = withExpandedValue(text, largeText.label, largeText.value, true, theme);
+				} else {
+					const preview = firstLine(largeText.value, 90);
+					if (preview) text += "\n" + theme.fg("toolOutput", preview);
+				}
 			}
 
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { isPartial }, theme) {
+		renderResult(result, { expanded, isPartial }, theme, context) {
 			if (isPartial) return new Text(theme.fg("warning", `solo ${mcpName}: \u2026`), 0, 0);
 
-			if (result.isError) {
+			if (context?.isError || result.isError) {
 				const msg = firstLine(
 					result.content[0]?.type === "text" ? result.content[0].text : "",
 					140,
 				);
-				return new Text(theme.fg("error", `\u2718 ${mcpName}: ${msg}`), 0, 0);
+				const summary = theme.fg("error", `\u2718 ${mcpName}: ${msg}`);
+				return new Text(withExpandedToolResult(summary, result, expanded, theme), 0, 0);
 			}
 
 			const data = extractJson(result);
@@ -1625,7 +1673,8 @@ function makeRenderers(mcpName: string): {
 				summary = firstLine(raw, 100) || "ok";
 			}
 
-			return new Text(theme.fg("success", "\u2713") + " " + theme.fg("dim", summary), 0, 0);
+			const summaryText = theme.fg("success", "\u2713") + " " + theme.fg("dim", summary);
+			return new Text(withExpandedToolResult(summaryText, result, expanded, theme), 0, 0);
 		},
 	};
 }
