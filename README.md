@@ -2,6 +2,8 @@
 
 Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Francis's local agent + dev-stack workspace for macOS.
 
+<img width="1822" height="1185" alt="SCR-20260516-irqz" src="https://github.com/user-attachments/assets/e537bf3c-2007-4915-a1a1-c85d86b9fdca" />
+
 ## What it does
 
 - **PI SOLO header banner** with a live status line beneath it: connection state (starting / warming / connected / disabled / error), catalog size split into direct vs. gateway tools, the active surface profile, and the current model. Replaces pi's built-in header on `session_start` and re-renders on model changes and on every Solo MCP client transition — so the very first thing you see on startup already advertises what the extension is contributing.
