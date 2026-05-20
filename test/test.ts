@@ -33,6 +33,15 @@ import {
 	isSoloFailureText,
 	SHORTCUT_TOOLS,
 } from "../pi-extension/solo/index.ts";
+import {
+	buildSoloTerminalNotificationCommand,
+	buildTerminalNotificationSequence,
+	detectTerminalNotificationMethod,
+	notificationModeIncludes,
+	parseSoloNotificationMode,
+	sanitizeNotificationText,
+	summarizeSubagentNotifications,
+} from "../pi-extension/solo/notifications.ts";
 import { formatExpandedToolResult, formatExpandedValue } from "../pi-extension/solo/rendering.ts";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +93,61 @@ test("getSoloToolCategory — groups common Solo MCP tools", () => {
 	assert.equal(getSoloToolCategory("get_project_stats"), "inspection");
 	assert.equal(getSoloToolCategory("help"), "docs");
 	assert.equal(getSoloToolCategory("whoami"), "session");
+});
+
+// ---------------------------------------------------------------------------
+// Solo notifications
+
+test("parseSoloNotificationMode — accepts documented modes and aliases", () => {
+	assert.equal(parseSoloNotificationMode(undefined), null);
+	assert.equal(parseSoloNotificationMode("off"), "off");
+	assert.equal(parseSoloNotificationMode("on"), "subagent");
+	assert.equal(parseSoloNotificationMode("subagents"), "subagent");
+	assert.equal(parseSoloNotificationMode("agent_end"), "agent-end");
+	assert.equal(parseSoloNotificationMode("all"), "all");
+	assert.equal(parseSoloNotificationMode("surprise"), null);
+});
+
+test("notificationModeIncludes — scopes subagent vs generic agent_end", () => {
+	assert.equal(notificationModeIncludes("off", "subagent"), false);
+	assert.equal(notificationModeIncludes("subagent", "subagent"), true);
+	assert.equal(notificationModeIncludes("subagent", "agent-end"), false);
+	assert.equal(notificationModeIncludes("agent-end", "subagent"), false);
+	assert.equal(notificationModeIncludes("agent-end", "agent-end"), true);
+	assert.equal(notificationModeIncludes("all", "subagent"), true);
+	assert.equal(notificationModeIncludes("all", "agent-end"), true);
+});
+
+test("detectTerminalNotificationMethod — detects direct local protocols", () => {
+	assert.equal(detectTerminalNotificationMethod({ TERM_PROGRAM: "solo" }, "darwin"), "osc777");
+	assert.equal(detectTerminalNotificationMethod({ TERM: "xterm-ghostty" }, "linux"), "osc777");
+	assert.equal(detectTerminalNotificationMethod({ KITTY_WINDOW_ID: "1" }, "linux"), "osc99");
+	assert.equal(detectTerminalNotificationMethod({ ITERM_SESSION_ID: "abc" }, "darwin"), "osc9");
+	assert.equal(detectTerminalNotificationMethod({}, "darwin"), "macos");
+	assert.equal(detectTerminalNotificationMethod({}, "linux"), "unsupported");
+});
+
+test("buildTerminalNotificationSequence — sanitizes OSC delimiters", () => {
+	const title = sanitizeNotificationText("Pi;\u001b\u0007Solo");
+	assert.equal(title, "Pi Solo");
+	const seq = buildTerminalNotificationSequence("osc777", "Pi;Solo", "ready\nnow");
+	assert.equal(seq, "\x1b]777;notify;Pi Solo;ready now\x07");
+});
+
+test("buildSoloTerminalNotificationCommand — sends OSC 777 from a real Solo terminal", () => {
+	assert.equal(
+		buildSoloTerminalNotificationCommand("Pi;Solo", "worker's done"),
+		`printf '%b' '\\033]777;notify;Pi Solo;worker'"'"'s done\\007'`,
+	);
+});
+
+test("summarizeSubagentNotifications — names a single finished worker", () => {
+	const summary = summarizeSubagentNotifications([
+		{ kind: "done", processId: 42, name: "Worker: Todo 7", agent: "worker" },
+	]);
+	assert.equal(summary.title, "Solo agent ready");
+	assert.match(summary.body, /Worker: Todo 7 \(worker\) finished in Solo #42/);
+	assert.match(summary.body, /waiting for input/);
 });
 
 test("listSoloCatalogTools — defaults to gateway entries", () => {

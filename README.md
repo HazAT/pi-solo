@@ -12,6 +12,7 @@ Native [Pi](https://pi.dev) extension for [Solo](https://soloterm.com), Aaron Fr
 - Spawns it lazily and speaks JSON-RPC over stdio — no separate MCP server to configure.
 - Queries Solo for its full tool catalog and exposes a curated tool surface. By default, only the handoff/workflow essentials (`scratchpad_write`, `scratchpad_read`, `scratchpad_list`, `todo_create`, `todo_list`, `todo_update`, `todo_complete`) are **first-class Pi tools**; lower-frequency cleanup/admin tools stay discoverable and callable through `solo_tool`.
 - **Solo-native, resumable subagents.** Spawn `scout`, `worker`, `planner`, `reviewer` (or any `~/.pi/agent/agents/<name>.md` definition) as real Solo agent processes via Solo's native `spawn_agent` MCP tool — visible in the sidebar with Solo's agent state, fire-and-forget, and woken via Solo's idle timer. Agent frontmatter `model` and `thinking` are forwarded as per-launch Pi `extra_args`, and every child gets a dedicated Pi `--session` JSONL file, so pi-solo can re-attach or respawn it after the parent restarts. Artifacts (plans, specs, context documents) flow through Solo scratchpads instead of local files.
+- **Optional Solo notifications** when a Solo subagent finishes and the parent Pi is ready for input. Enable with `/solo-notify subagent`, `PI_SOLO_NOTIFY=subagent`, or `"piSolo": { "notifications": "subagent" }` in Pi settings. Notifications are sent through a dedicated Solo terminal so they use Solo's in-app notification path, not macOS system notifications.
 - **Auto-binds to `SOLO_PROCESS_ID`** via Solo's canonical `identify_session` tool when Pi runs as a Solo agent, so timers, locks, and todos owned by this Pi process behave correctly.
 - **Idle-closes the helper** after 5 s of inactivity so it doesn't show up as a persistent subprocess under your Pi row in Solo's sidebar. Bursts of MCP calls reuse one warm helper; quiet periods cost zero subprocesses.
 - **Renders keyboard shortcuts** on spawn/start/restart/status results so you can press `⌥3 · ⌘5` (or whatever the position resolves to) to jump straight to the relevant agent in Solo's sidebar.
@@ -70,15 +71,16 @@ The status dot reflects the SoloMcpClient state — green when connected, yellow
 
 ## Commands
 
-| Command                                                    | Purpose                                                                        |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `/solo`                                                    | Show connection status, catalog/direct/gateway counts, bound project & process |
-| `/solo-tools`                                              | List Solo MCP catalog tools and whether they are direct or gateway-only        |
-| `/solo-refresh`                                            | Re-query Solo for its current tool catalog (cheap)                             |
-| `/solo-reconnect`                                          | Force-restart the helper                                                       |
-| `/solo-bind <process-id>`                                  | Manually bind this Pi to a Solo process                                        |
-| `/solo-subagent <name> [task]`                             | Spawn a Solo subagent by agent name (scout, worker, …)                         |
-| `/solo-subagent-resume <id\|process-id\|session> [prompt]` | Resume/re-attach a subagent or respawn Pi with an existing `--session` file    |
+| Command                                                               | Purpose                                                                        |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `/solo`                                                               | Show connection status, catalog/direct/gateway counts, bound project & process |
+| `/solo-tools`                                                         | List Solo MCP catalog tools and whether they are direct or gateway-only        |
+| `/solo-refresh`                                                       | Re-query Solo for its current tool catalog (cheap)                             |
+| `/solo-reconnect`                                                     | Force-restart the helper                                                       |
+| `/solo-bind <process-id>`                                             | Manually bind this Pi to a Solo process                                        |
+| `/solo-subagent <name> [task]`                                        | Spawn a Solo subagent by agent name (scout, worker, …)                         |
+| `/solo-subagent-resume <id\|process-id\|session> [prompt]`            | Resume/re-attach a subagent or respawn Pi with an existing `--session` file    |
+| `/solo-notify [status\|test [method]\|off\|subagent\|agent-end\|all]` | Configure/test Solo notifications for completed Solo work                      |
 
 ## Solo subagents
 
@@ -153,13 +155,26 @@ solo_tool({
 
 ## Configuration
 
-| Env var                 | Default                                     | Purpose                                            |
-| ----------------------- | ------------------------------------------- | -------------------------------------------------- |
-| `SOLO_MCP_HELPER`       | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper                         |
-| `SOLOTERM_APP_DATA_DIR` | `~/.config/soloterm`                        | Solo's app data dir (passed through)               |
-| `SOLO_PROCESS_ID`       | —                                           | If set, Pi auto-binds to that Solo process         |
-| `PI_SOLO_DISABLED`      | —                                           | Set to `1` to disable the extension entirely       |
-| `PI_SOLO_TOOL_SURFACE`  | `core`                                      | Tool surface profile: `core`, `full`, or `minimal` |
+| Env var                 | Default                                     | Purpose                                                      |
+| ----------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `SOLO_MCP_HELPER`       | `/Applications/Solo.app/Contents/MacOS/mcp` | Path to the bundled helper                                   |
+| `SOLOTERM_APP_DATA_DIR` | `~/.config/soloterm`                        | Solo's app data dir (passed through)                         |
+| `SOLO_PROCESS_ID`       | —                                           | If set, Pi auto-binds to that Solo process                   |
+| `PI_SOLO_DISABLED`      | —                                           | Set to `1` to disable the extension entirely                 |
+| `PI_SOLO_TOOL_SURFACE`  | `core`                                      | Tool surface profile: `core`, `full`, or `minimal`           |
+| `PI_SOLO_NOTIFY`        | `off`                                       | Solo notifications: `off`, `subagent`, `agent-end`, or `all` |
+
+Notification modes can also be set in `~/.pi/agent/settings.json` or `.pi/settings.json`:
+
+```json
+{
+	"piSolo": {
+		"notifications": "subagent"
+	}
+}
+```
+
+Use `/solo-notify test` to verify Solo shows the notification before leaving it on. The default test creates/reuses a `Pi Solo Notifications` terminal and sends OSC 777 from there; `/solo-notify test macos` is available only as a diagnostic fallback.
 
 ## How it works under the hood
 

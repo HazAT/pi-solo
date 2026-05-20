@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import type { SoloSubagentNotification } from "../notifications.ts";
 import { formatExpandedToolResult, formatExpandedValue, styleExpandedBlock } from "../rendering.ts";
 import {
 	type SoloMcpLike,
@@ -857,12 +858,22 @@ async function emitSubagentResult(
 		scratchpadId?: number;
 		scratchpadName?: string;
 		id?: string;
+		onSubagentReady?: (notification: SoloSubagentNotification) => void;
 	},
 ): Promise<void> {
 	if (params.id) runningSubagents.delete(params.id);
 	persistSubagentComplete(pi, { id: params.id, processId: params.processId });
 
 	const llmBody = buildShortWakeBody({
+		kind: params.kind,
+		processId: params.processId,
+		name: params.name,
+		agent: params.agent,
+		scratchpadId: params.scratchpadId,
+		scratchpadName: params.scratchpadName,
+	});
+
+	params.onSubagentReady?.({
 		kind: params.kind,
 		processId: params.processId,
 		name: params.name,
@@ -972,6 +983,7 @@ async function restorePersistedSubagent(
 	pi: ExtensionAPI,
 	client: SoloMcpLike,
 	state: PersistedSubagentState,
+	onSubagentReady?: (notification: SoloSubagentNotification) => void,
 ): Promise<void> {
 	if (runningSubagents.has(state.id)) return;
 
@@ -989,6 +1001,7 @@ async function restorePersistedSubagent(
 				scratchpadId: running.artifactScratchpadId,
 				scratchpadName: running.artifactScratchpadName,
 				id: running.id,
+				onSubagentReady,
 			});
 			return;
 		}
@@ -1003,6 +1016,7 @@ async function restorePersistedSubagent(
 				scratchpadId: running.artifactScratchpadId,
 				scratchpadName: running.artifactScratchpadName,
 				id: running.id,
+				onSubagentReady,
 			});
 		}
 		return;
@@ -1020,6 +1034,7 @@ async function restorePersistedSubagent(
 			scratchpadId: state.artifactScratchpadId,
 			scratchpadName: state.artifactScratchpadName,
 			id: state.id,
+			onSubagentReady,
 		});
 		return;
 	}
@@ -1035,6 +1050,7 @@ async function restorePersistedSubagent(
 			scratchpadId: running.artifactScratchpadId,
 			scratchpadName: running.artifactScratchpadName,
 			id: running.id,
+			onSubagentReady,
 		});
 	}
 }
@@ -1043,11 +1059,12 @@ async function restorePersistedSubagents(
 	pi: ExtensionAPI,
 	client: SoloMcpLike,
 	ctx: ExtensionContext,
+	onSubagentReady?: (notification: SoloSubagentNotification) => void,
 ): Promise<void> {
 	const states = reconstructPersistedSubagents(ctx.sessionManager.getBranch());
 	for (const state of states.values()) {
 		try {
-			await restorePersistedSubagent(pi, client, state);
+			await restorePersistedSubagent(pi, client, state, onSubagentReady);
 		} catch {
 			// Resume is best-effort. The persisted entry remains, so the user can
 			// retry with /solo-subagent-resume once Solo/MCP is available again.
@@ -1160,12 +1177,13 @@ function muxUnavailableResult(reason: string) {
 export interface SoloSubagentDeps {
 	client: SoloMcpLike;
 	isClientReady: () => boolean;
+	onSubagentReady?: (notification: SoloSubagentNotification) => void;
 }
 
 export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (!deps.isClientReady()) return;
-		await restorePersistedSubagents(pi, deps.client, ctx);
+		await restorePersistedSubagents(pi, deps.client, ctx, deps.onSubagentReady);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -1196,6 +1214,7 @@ export function initSoloSubagents(pi: ExtensionAPI, deps: SoloSubagentDeps) {
 				scratchpadId: marker.scratchpadId ?? running?.artifactScratchpadId,
 				scratchpadName: running?.artifactScratchpadName,
 				id: running?.id,
+				onSubagentReady: deps.onSubagentReady,
 			});
 			return { action: "handled" };
 		} catch {

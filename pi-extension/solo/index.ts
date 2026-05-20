@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { installSoloHeader, setSoloHeaderStatus } from "./header.ts";
+import { initSoloNotifications } from "./notifications.ts";
 import { formatExpandedToolResult, formatExpandedValue, styleExpandedBlock } from "./rendering.ts";
 import { initSoloSubagents } from "./subagents/index.ts";
 
@@ -1175,6 +1176,10 @@ export default function soloExtension(pi: ExtensionAPI) {
 	);
 
 	registerSoloToolGateway(pi, client);
+	const notifications = initSoloNotifications(pi, {
+		client,
+		isClientReady: () => client.isReady() && !client.isMcpDisabled(),
+	});
 
 	// --- Lifecycle ----------------------------------------------------------
 
@@ -1198,6 +1203,7 @@ export default function soloExtension(pi: ExtensionAPI) {
 	initSoloSubagents(pi, {
 		client,
 		isClientReady: () => client.isReady() && !client.isMcpDisabled(),
+		onSubagentReady: notifications.queueSubagentReady,
 	});
 
 	// --- Commands -----------------------------------------------------------
