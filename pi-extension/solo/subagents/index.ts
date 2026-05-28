@@ -298,7 +298,6 @@ export function buildArtifactScratchpadName(
 
 interface CreatedScratchpad {
 	scratchpadId?: number;
-	revision?: number;
 	name: string;
 }
 
@@ -339,7 +338,6 @@ async function preCreateArtifactScratchpad(
 		return {
 			name,
 			scratchpadId: typeof data.scratchpad_id === "number" ? data.scratchpad_id : undefined,
-			revision: typeof data.revision === "number" ? data.revision : undefined,
 		};
 	} catch {
 		return { name };
@@ -362,7 +360,6 @@ interface BuildTaskParams {
 	task: string;
 	artifactScratchpadName?: string;
 	artifactScratchpadId?: number;
-	artifactScratchpadRevision?: number;
 	interactive?: boolean;
 }
 
@@ -386,11 +383,9 @@ export function buildWrappedTask(params: BuildTaskParams): string {
 		const idText =
 			params.artifactScratchpadId != null ? ` (id ${params.artifactScratchpadId})` : "";
 		const writeHint =
-			params.artifactScratchpadId != null && params.artifactScratchpadRevision != null
-				? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId}, expected_revision: ${params.artifactScratchpadRevision}, and your content. If the tool ever returns a revision-mismatch error, retry once using the \`current\` value from the error message; do not call scratchpad_read first.`
-				: params.artifactScratchpadId != null
-					? ` Call scratchpad_write with scratchpad_id: ${params.artifactScratchpadId} and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the \`current\` value from the error message.`
-					: " Call scratchpad_write with that name and your content. Omit expected_revision on the first write; if a revision-mismatch error comes back, retry once with the `current` value from the error message.";
+			params.artifactScratchpadId != null
+				? ` First call scratchpad_read({ scratchpad_id: ${params.artifactScratchpadId} }) to get the current revision, then call scratchpad_write({ scratchpad_id: ${params.artifactScratchpadId}, expected_revision: <revision from the read>, content: ... }). If the write still returns a revision-mismatch error, repeat the read+write cycle using the \`current\` value from the error message.`
+				: " Call scratchpad_write with that name and your content (no scratchpad_id, no expected_revision); this creates a fresh scratchpad. If a revision-mismatch error comes back, retry once with the `current` value from the error message.";
 		sections.push(
 			[
 				"### Artifact (Solo scratchpad)",
@@ -786,7 +781,6 @@ async function launchSubagent(
 		task: params.task,
 		artifactScratchpadName: artifact?.name,
 		artifactScratchpadId: artifact?.scratchpadId,
-		artifactScratchpadRevision: artifact?.revision,
 		interactive,
 	});
 

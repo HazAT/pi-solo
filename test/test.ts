@@ -610,7 +610,7 @@ test("buildWrappedTask — omits artifact block without scratchpad", () => {
 	assert.doesNotMatch(wrapped, /Artifact \(Solo scratchpad\)/);
 });
 
-test("buildWrappedTask — includes scratchpad id and retry-on-mismatch guidance without revision", () => {
+test("buildWrappedTask — tells subagent to read-then-write so the first write is foolproof", () => {
 	const wrapped = buildWrappedTask({
 		task: "do the thing",
 		artifactScratchpadName: "planner/2026-05-13-plan",
@@ -618,26 +618,25 @@ test("buildWrappedTask — includes scratchpad id and retry-on-mismatch guidance
 	});
 	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
 	assert.match(wrapped, /planner\/2026-05-13-plan/);
-	assert.match(wrapped, /scratchpad_id: 42/);
-	assert.doesNotMatch(wrapped, /expected_revision: \d+/);
+	assert.match(wrapped, /scratchpad_read\(\{ scratchpad_id: 42 \}\)/);
+	assert.match(wrapped, /scratchpad_write\(\{ scratchpad_id: 42/);
+	assert.match(wrapped, /expected_revision: <revision from the read>/);
 	assert.match(wrapped, /revision-mismatch/);
-	assert.match(wrapped, /retry once/);
+	// No hardcoded revision in the prompt — agent always reads the live revision.
+	assert.doesNotMatch(wrapped, /expected_revision: \d+/);
 	assert.doesNotMatch(wrapped, /subagent_done/);
 });
 
-test("buildWrappedTask — includes expected_revision when pre-created scratchpad revision is known", () => {
+test("buildWrappedTask — name-only artifact (no id) tells subagent to create fresh", () => {
 	const wrapped = buildWrappedTask({
 		task: "do the thing",
 		artifactScratchpadName: "worker/2026-05-13-plan",
-		artifactScratchpadId: 42,
-		artifactScratchpadRevision: 1,
 	});
 	assert.match(wrapped, /Artifact \(Solo scratchpad\)/);
-	assert.match(wrapped, /scratchpad_id: 42/);
-	assert.match(wrapped, /expected_revision: 1/);
-	assert.match(wrapped, /revision-mismatch/);
-	assert.match(wrapped, /retry once/);
-	assert.doesNotMatch(wrapped, /you do not need expected_revision/);
+	assert.match(wrapped, /worker\/2026-05-13-plan/);
+	assert.match(wrapped, /no scratchpad_id, no expected_revision/);
+	assert.match(wrapped, /creates a fresh scratchpad/);
+	assert.doesNotMatch(wrapped, /scratchpad_id: \d+/);
 });
 
 test("buildWrappedTask — interactive variant tells child to wait for continuation", () => {
